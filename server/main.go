@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -43,6 +44,43 @@ type rpcResponse struct {
 type streamEvent struct {
 	name string
 	data any
+}
+
+type activeTurn struct {
+	TurnID      string
+	ActiveFlags []string
+}
+
+type threadRuntimeStatus struct {
+	Type        string   `json:"type"`
+	ActiveFlags []string `json:"activeFlags,omitempty"`
+}
+
+type commandApproval struct {
+	ID                 string   `json:"id"`
+	ThreadID           string   `json:"threadId"`
+	TurnID             string   `json:"turnId,omitempty"`
+	Command            string   `json:"command"`
+	CWD                string   `json:"cwd,omitempty"`
+	Environment        string   `json:"environment"`
+	Reason             string   `json:"reason,omitempty"`
+	ProposedExecPrefix []string `json:"proposedExecPrefix,omitempty"`
+	StartedAtMs        int64    `json:"startedAtMs"`
+}
+
+type pendingApproval struct {
+	Request commandApproval
+	Method  string
+	RPCID   json.RawMessage
+}
+
+type runtimeSnapshot struct {
+	Type        string            `json:"type"`
+	ThreadID    string            `json:"threadId"`
+	Working     bool              `json:"working"`
+	TurnID      string            `json:"turnId,omitempty"`
+	ActiveFlags []string          `json:"activeFlags,omitempty"`
+	Approvals   []commandApproval `json:"approvals"`
 }
 
 type socketHub struct {
@@ -95,8 +133,14 @@ type Codex struct {
 	streams   map[string]chan streamEvent
 	knownMu   sync.Mutex
 	known     map[string]bool
+	richMu    sync.RWMutex
+	rich      map[string]map[string][]historyMessage
+	stateMu   sync.RWMutex
+	active    map[string]activeTurn
+	approvals map[string]pendingApproval
 	hub       *socketHub
 	nextID    atomic.Int64
+	nextUIID  atomic.Int64
 	ready     atomic.Bool
 	done      chan struct{}
 	closeOnce sync.Once
@@ -110,7 +154,7 @@ func startCodex(bin, endpoint string) (*Codex, error) {
 	probeCancel()
 	if existingErr == nil {
 		existingConn.SetReadLimit(16 * 1024 * 1024)
-		c := &Codex{conn: existingConn, endpoint: endpoint, pending: make(map[string]chan rpcResponse), streams: make(map[string]chan streamEvent), known: make(map[string]bool), hub: newSocketHub(), done: make(chan struct{})}
+		c := newCodex(existingConn, endpoint)
 		go c.readLoop()
 		if err := c.initialize(); err != nil {
 			c.conn.CloseNow()
@@ -130,7 +174,8 @@ func startCodex(bin, endpoint string) (*Codex, error) {
 		return nil, err
 	}
 
-	c := &Codex{cmd: cmd, endpoint: endpoint, pending: make(map[string]chan rpcResponse), streams: make(map[string]chan streamEvent), known: make(map[string]bool), hub: newSocketHub(), done: make(chan struct{})}
+	c := newCodex(nil, endpoint)
+	c.cmd = cmd
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start codex: %w", err)
 	}
@@ -172,6 +217,21 @@ func startCodex(bin, endpoint string) (*Codex, error) {
 	}
 	log.Printf("started shared Codex app-server at %s", endpoint)
 	return c, nil
+}
+
+func newCodex(conn *websocket.Conn, endpoint string) *Codex {
+	return &Codex{
+		conn:      conn,
+		endpoint:  endpoint,
+		pending:   make(map[string]chan rpcResponse),
+		streams:   make(map[string]chan streamEvent),
+		known:     make(map[string]bool),
+		rich:      make(map[string]map[string][]historyMessage),
+		active:    make(map[string]activeTurn),
+		approvals: make(map[string]pendingApproval),
+		hub:       newSocketHub(),
+		done:      make(chan struct{}),
+	}
 }
 
 func (c *Codex) initialize() error {
@@ -285,14 +345,276 @@ func (c *Codex) readLoop() {
 			continue
 		}
 		if len(msg.ID) > 0 && msg.Method != "" {
-			// This local-only bridge deliberately does not approve privilege or elicitation requests.
-			_ = c.write(map[string]any{"id": json.RawMessage(msg.ID), "error": map[string]any{"code": -32601, "message": "Interactive server requests are not supported by this web bridge"}})
+			if !c.handleServerRequest(msg.ID, msg.Method, msg.Params) {
+				_ = c.write(map[string]any{"id": json.RawMessage(msg.ID), "error": map[string]any{"code": -32601, "message": "This interactive server request is not supported by the web bridge"}})
+			}
 			continue
 		}
 		if msg.Method != "" {
 			c.handleNotification(msg.Method, msg.Params)
 		}
 	}
+}
+
+func (c *Codex) handleServerRequest(rpcID json.RawMessage, method string, raw json.RawMessage) bool {
+	approval := commandApproval{
+		ID:          "approval-" + strconv.FormatInt(c.nextUIID.Add(1), 10),
+		Environment: "local",
+		StartedAtMs: time.Now().UnixMilli(),
+	}
+	switch method {
+	case "item/commandExecution/requestApproval":
+		var params struct {
+			ThreadID                    string   `json:"threadId"`
+			TurnID                      string   `json:"turnId"`
+			Command                     string   `json:"command"`
+			CWD                         string   `json:"cwd"`
+			EnvironmentID               string   `json:"environmentId"`
+			Reason                      string   `json:"reason"`
+			ProposedExecpolicyAmendment []string `json:"proposedExecpolicyAmendment"`
+			StartedAtMs                 int64    `json:"startedAtMs"`
+		}
+		if json.Unmarshal(raw, &params) != nil || params.ThreadID == "" {
+			return false
+		}
+		approval.ThreadID = params.ThreadID
+		approval.TurnID = params.TurnID
+		approval.Command = params.Command
+		approval.CWD = params.CWD
+		approval.Environment = firstNonEmpty(params.EnvironmentID, "local")
+		approval.Reason = params.Reason
+		approval.ProposedExecPrefix = params.ProposedExecpolicyAmendment
+		if params.StartedAtMs != 0 {
+			approval.StartedAtMs = params.StartedAtMs
+		}
+	case "execCommandApproval":
+		var params struct {
+			ConversationID string   `json:"conversationId"`
+			Command        []string `json:"command"`
+			CWD            string   `json:"cwd"`
+			Reason         string   `json:"reason"`
+		}
+		if json.Unmarshal(raw, &params) != nil || params.ConversationID == "" {
+			return false
+		}
+		approval.ThreadID = params.ConversationID
+		approval.Command = strings.Join(params.Command, " ")
+		approval.CWD = params.CWD
+		approval.Reason = params.Reason
+	default:
+		return false
+	}
+
+	c.stateMu.Lock()
+	if c.approvals == nil {
+		c.approvals = make(map[string]pendingApproval)
+	}
+	c.approvals[approval.ID] = pendingApproval{Request: approval, Method: method, RPCID: append(json.RawMessage(nil), rpcID...)}
+	if c.active == nil {
+		c.active = make(map[string]activeTurn)
+	}
+	active := c.active[approval.ThreadID]
+	if approval.TurnID != "" {
+		active.TurnID = approval.TurnID
+	}
+	active.ActiveFlags = addString(active.ActiveFlags, "waitingOnApproval")
+	c.active[approval.ThreadID] = active
+	c.stateMu.Unlock()
+	c.broadcastRuntime(approval.ThreadID)
+	return true
+}
+
+func addString(items []string, value string) []string {
+	for _, item := range items {
+		if item == value {
+			return items
+		}
+	}
+	return append(items, value)
+}
+
+func removeString(items []string, value string) []string {
+	result := make([]string, 0, len(items))
+	for _, item := range items {
+		if item != value {
+			result = append(result, item)
+		}
+	}
+	return result
+}
+
+func (c *Codex) resolveApproval(id, choice string) error {
+	c.stateMu.Lock()
+	pending, ok := c.approvals[id]
+	if !ok {
+		c.stateMu.Unlock()
+		return errors.New("approval is no longer pending")
+	}
+	delete(c.approvals, id)
+	c.stateMu.Unlock()
+
+	result, err := approvalResponse(pending, choice)
+	if err != nil {
+		c.stateMu.Lock()
+		c.approvals[id] = pending
+		c.stateMu.Unlock()
+		return err
+	}
+	if err := c.write(map[string]any{"id": pending.RPCID, "result": result}); err != nil {
+		c.stateMu.Lock()
+		c.approvals[id] = pending
+		c.stateMu.Unlock()
+		return err
+	}
+
+	c.stateMu.Lock()
+	active := c.active[pending.Request.ThreadID]
+	stillWaiting := false
+	for _, other := range c.approvals {
+		if other.Request.ThreadID == pending.Request.ThreadID {
+			stillWaiting = true
+			break
+		}
+	}
+	if !stillWaiting {
+		active.ActiveFlags = removeString(active.ActiveFlags, "waitingOnApproval")
+		c.active[pending.Request.ThreadID] = active
+	}
+	c.stateMu.Unlock()
+	c.hub.broadcast(map[string]any{"type": "approval/resolved", "threadId": pending.Request.ThreadID, "approvalId": id, "decision": choice})
+	c.broadcastRuntime(pending.Request.ThreadID)
+	return nil
+}
+
+func approvalResponse(pending pendingApproval, choice string) (map[string]any, error) {
+	switch pending.Method {
+	case "item/commandExecution/requestApproval":
+		var decision any
+		switch choice {
+		case "accept":
+			decision = "accept"
+		case "always":
+			if len(pending.Request.ProposedExecPrefix) > 0 {
+				decision = map[string]any{"acceptWithExecpolicyAmendment": map[string]any{"execpolicy_amendment": pending.Request.ProposedExecPrefix}}
+			} else {
+				decision = "acceptForSession"
+			}
+		case "decline":
+			decision = "decline"
+		case "cancel":
+			decision = "cancel"
+		default:
+			return nil, errors.New("invalid approval decision")
+		}
+		return map[string]any{"decision": decision}, nil
+	case "execCommandApproval":
+		var decision any
+		switch choice {
+		case "accept":
+			decision = "approved"
+		case "always":
+			decision = "approved_for_session"
+		case "decline":
+			decision = map[string]any{"denied": map[string]string{"rejection": "Command declined from the Web UX"}}
+		case "cancel":
+			decision = "abort"
+		default:
+			return nil, errors.New("invalid approval decision")
+		}
+		return map[string]any{"decision": decision}, nil
+	default:
+		return nil, errors.New("unsupported approval request")
+	}
+}
+
+func (c *Codex) runtimeSnapshot(threadID string) runtimeSnapshot {
+	c.stateMu.RLock()
+	active, working := c.active[threadID]
+	approvals := make([]commandApproval, 0)
+	for _, pending := range c.approvals {
+		if pending.Request.ThreadID == threadID {
+			approvals = append(approvals, pending.Request)
+		}
+	}
+	c.stateMu.RUnlock()
+	sort.Slice(approvals, func(i, j int) bool {
+		if approvals[i].StartedAtMs == approvals[j].StartedAtMs {
+			return approvals[i].ID < approvals[j].ID
+		}
+		return approvals[i].StartedAtMs < approvals[j].StartedAtMs
+	})
+	return runtimeSnapshot{Type: "runtime/snapshot", ThreadID: threadID, Working: working, TurnID: active.TurnID, ActiveFlags: append([]string(nil), active.ActiveFlags...), Approvals: approvals}
+}
+
+func (c *Codex) broadcastRuntime(threadID string) {
+	if threadID != "" {
+		c.hub.broadcast(c.runtimeSnapshot(threadID))
+	}
+}
+
+func (c *Codex) setActiveTurn(threadID, turnID string, activeFlags []string) {
+	if threadID == "" {
+		return
+	}
+	c.stateMu.Lock()
+	if c.active == nil {
+		c.active = make(map[string]activeTurn)
+	}
+	current, exists := c.active[threadID]
+	next := current
+	if turnID != "" {
+		next.TurnID = turnID
+	}
+	if activeFlags != nil {
+		next.ActiveFlags = append([]string(nil), activeFlags...)
+	}
+	changed := !exists || current.TurnID != next.TurnID || strings.Join(current.ActiveFlags, "\x00") != strings.Join(next.ActiveFlags, "\x00")
+	c.active[threadID] = next
+	c.stateMu.Unlock()
+	if changed {
+		c.broadcastRuntime(threadID)
+	}
+}
+
+func (c *Codex) clearActiveTurn(threadID, turnID string) {
+	if threadID == "" {
+		return
+	}
+	c.stateMu.Lock()
+	current, exists := c.active[threadID]
+	if exists && (turnID == "" || current.TurnID == "" || current.TurnID == turnID) {
+		delete(c.active, threadID)
+	}
+	c.stateMu.Unlock()
+	if exists {
+		c.broadcastRuntime(threadID)
+	}
+}
+
+func (c *Codex) applyThreadStatus(threadID string, status threadRuntimeStatus) {
+	if status.Type == "active" {
+		c.setActiveTurn(threadID, "", status.ActiveFlags)
+		return
+	}
+	if status.Type == "idle" || status.Type == "systemError" {
+		c.clearActiveTurn(threadID, "")
+	}
+}
+
+func (c *Codex) reconcileRuntime(threadID string, status threadRuntimeStatus, turns []threadTurn) runtimeSnapshot {
+	if status.Type == "active" {
+		turnID := ""
+		for index := len(turns) - 1; index >= 0; index-- {
+			if turns[index].Status == "inProgress" {
+				turnID = turns[index].ID
+				break
+			}
+		}
+		c.setActiveTurn(threadID, turnID, status.ActiveFlags)
+	} else if status.Type == "idle" || status.Type == "systemError" {
+		c.clearActiveTurn(threadID, "")
+	}
+	return c.runtimeSnapshot(threadID)
 }
 
 func (c *Codex) handleNotification(method string, raw json.RawMessage) {
@@ -306,12 +628,39 @@ func (c *Codex) handleNotification(method string, raw json.RawMessage) {
 		return
 	}
 	switch method {
+	case "turn/started":
+		var params struct {
+			Turn struct {
+				ID string `json:"id"`
+			} `json:"turn"`
+		}
+		_ = json.Unmarshal(raw, &params)
+		c.setActiveTurn(base.ThreadID, params.Turn.ID, nil)
+	case "thread/status/changed":
+		var params struct {
+			Status threadRuntimeStatus `json:"status"`
+		}
+		_ = json.Unmarshal(raw, &params)
+		c.applyThreadStatus(base.ThreadID, params.Status)
+	case "turn/completed":
+		c.clearActiveTurn(base.ThreadID, base.TurnID)
+	default:
+		if base.TurnID != "" {
+			c.setActiveTurn(base.ThreadID, base.TurnID, nil)
+		}
+	}
+	c.rememberTimelineItem(method, base.ThreadID, base.TurnID, raw)
+	if method == "item/started" || method == "item/completed" || method == "item/commandExecution/outputDelta" || method == "turn/completed" {
+		c.emit(base.ThreadID, streamEvent{"protocol", map[string]any{"type": "notification", "method": method, "params": json.RawMessage(raw)}})
+	}
+	switch method {
 	case "item/agentMessage/delta":
 		var p struct {
-			Delta string `json:"delta"`
+			Delta  string `json:"delta"`
+			ItemID string `json:"itemId"`
 		}
 		_ = json.Unmarshal(raw, &p)
-		c.emit(base.ThreadID, streamEvent{"delta", map[string]string{"text": p.Delta}})
+		c.emit(base.ThreadID, streamEvent{"delta", map[string]string{"text": p.Delta, "itemId": p.ItemID}})
 	case "item/started":
 		var p struct {
 			Item struct{ Type, Command, Query, Tool, Server string } `json:"item"`
@@ -346,6 +695,150 @@ func (c *Codex) handleNotification(method string, raw json.RawMessage) {
 			c.emit(base.ThreadID, streamEvent{"error", map[string]string{"message": firstNonEmpty(p.Error.Message, "Codex reported an error")}})
 		}
 	}
+}
+
+// Command executions are streamed by app-server but are not currently included
+// in its thread/read projection. Keep them materialized alongside lightweight
+// user/agent item markers so history reloads can reconstruct the live order.
+func (c *Codex) rememberTimelineItem(method, threadID, turnID string, raw json.RawMessage) {
+	if turnID == "" {
+		return
+	}
+	var timelineItem historyMessage
+	switch method {
+	case "item/started", "item/completed":
+		var params struct {
+			Item struct {
+				Type             string  `json:"type"`
+				ID               string  `json:"id"`
+				Text             string  `json:"text"`
+				Command          string  `json:"command"`
+				CWD              string  `json:"cwd"`
+				AggregatedOutput *string `json:"aggregatedOutput"`
+				Status           string  `json:"status"`
+				ExitCode         *int    `json:"exitCode"`
+				DurationMs       *int64  `json:"durationMs"`
+				Content          []struct {
+					Type string `json:"type"`
+					Text string `json:"text"`
+				} `json:"content"`
+			} `json:"item"`
+		}
+		if json.Unmarshal(raw, &params) != nil || params.Item.ID == "" {
+			return
+		}
+		switch params.Item.Type {
+		case "userMessage":
+			parts := make([]string, 0, len(params.Item.Content))
+			for _, input := range params.Item.Content {
+				if input.Type == "text" && strings.TrimSpace(input.Text) != "" {
+					parts = append(parts, input.Text)
+				}
+			}
+			timelineItem = historyMessage{Kind: "marker", ID: params.Item.ID, ItemType: params.Item.Type, Text: strings.TrimSpace(strings.Join(parts, "\n"))}
+		case "agentMessage":
+			timelineItem = historyMessage{Kind: "marker", ID: params.Item.ID, ItemType: params.Item.Type, Text: strings.TrimSpace(params.Item.Text)}
+		case "commandExecution":
+			timelineItem = historyMessage{
+				Kind:       "command",
+				ID:         params.Item.ID,
+				ItemType:   params.Item.Type,
+				Command:    params.Item.Command,
+				CWD:        params.Item.CWD,
+				Status:     params.Item.Status,
+				ExitCode:   params.Item.ExitCode,
+				DurationMs: params.Item.DurationMs,
+			}
+			if params.Item.AggregatedOutput != nil {
+				timelineItem.Output = *params.Item.AggregatedOutput
+			}
+		default:
+			return
+		}
+	case "item/commandExecution/outputDelta":
+		var params struct {
+			ItemID string `json:"itemId"`
+			Delta  string `json:"delta"`
+		}
+		if json.Unmarshal(raw, &params) != nil || params.ItemID == "" {
+			return
+		}
+		timelineItem = historyMessage{Kind: "command", ID: params.ItemID, ItemType: "commandExecution", Output: params.Delta, Status: "inProgress"}
+	case "item/agentMessage/delta":
+		var params struct {
+			ItemID string `json:"itemId"`
+			Delta  string `json:"delta"`
+		}
+		if json.Unmarshal(raw, &params) != nil || params.ItemID == "" {
+			return
+		}
+		timelineItem = historyMessage{Kind: "marker", ID: params.ItemID, ItemType: "agentMessage", Text: params.Delta}
+	default:
+		return
+	}
+	c.richMu.Lock()
+	defer c.richMu.Unlock()
+	if c.rich == nil {
+		c.rich = make(map[string]map[string][]historyMessage)
+	}
+	if c.rich[threadID] == nil {
+		c.rich[threadID] = make(map[string][]historyMessage)
+	}
+	items := c.rich[threadID][turnID]
+	for index := range items {
+		if items[index].ID != timelineItem.ID {
+			continue
+		}
+		if timelineItem.Kind == "marker" {
+			if method == "item/agentMessage/delta" {
+				items[index].Text += timelineItem.Text
+			} else if timelineItem.Text != "" {
+				items[index].Text = timelineItem.Text
+			}
+			c.rich[threadID][turnID] = items
+			return
+		}
+		items[index].Kind = timelineItem.Kind
+		items[index].ItemType = timelineItem.ItemType
+		if timelineItem.Command != "" {
+			items[index].Command = timelineItem.Command
+		}
+		if timelineItem.CWD != "" {
+			items[index].CWD = timelineItem.CWD
+		}
+		if method == "item/commandExecution/outputDelta" {
+			items[index].Output += timelineItem.Output
+		} else {
+			items[index].Output = timelineItem.Output
+		}
+		if timelineItem.Status != "" {
+			items[index].Status = timelineItem.Status
+		}
+		items[index].ExitCode = timelineItem.ExitCode
+		items[index].DurationMs = timelineItem.DurationMs
+		c.rich[threadID][turnID] = items
+		return
+	}
+	// Bound each turn's bridge-only transcript cache. Persisted messages remain
+	// owned by app-server; this only fills the command-event gap in thread/read.
+	if len(items) >= 512 {
+		items = append([]historyMessage(nil), items[len(items)-511:]...)
+	}
+	c.rich[threadID][turnID] = append(items, timelineItem)
+}
+
+func (c *Codex) richSnapshot(threadID string) map[string][]historyMessage {
+	c.richMu.RLock()
+	defer c.richMu.RUnlock()
+	turns := c.rich[threadID]
+	if len(turns) == 0 {
+		return nil
+	}
+	snapshot := make(map[string][]historyMessage, len(turns))
+	for turnID, items := range turns {
+		snapshot[turnID] = append([]historyMessage(nil), items...)
+	}
+	return snapshot
 }
 
 func activityLabel(kind, command, query, tool, server string) string {
@@ -423,8 +916,10 @@ type server struct {
 }
 
 type browserCommand struct {
-	Type     string `json:"type"`
-	ThreadID string `json:"threadId"`
+	Type       string `json:"type"`
+	ThreadID   string `json:"threadId"`
+	ApprovalID string `json:"approvalId"`
+	Decision   string `json:"decision"`
 }
 type chatRequest struct {
 	Message  string `json:"message"`
@@ -444,8 +939,23 @@ type threadSummary struct {
 }
 
 type historyMessage struct {
-	Role string `json:"role"`
-	Text string `json:"text"`
+	ItemType   string `json:"-"`
+	Kind       string `json:"kind,omitempty"`
+	ID         string `json:"id,omitempty"`
+	Role       string `json:"role,omitempty"`
+	Text       string `json:"text,omitempty"`
+	Command    string `json:"command,omitempty"`
+	CWD        string `json:"cwd,omitempty"`
+	Output     string `json:"output,omitempty"`
+	Status     string `json:"status,omitempty"`
+	ExitCode   *int   `json:"exitCode,omitempty"`
+	DurationMs *int64 `json:"durationMs,omitempty"`
+}
+
+type threadTurn struct {
+	ID     string            `json:"id"`
+	Status string            `json:"status"`
+	Items  []json.RawMessage `json:"items"`
 }
 
 func (s *server) health(w http.ResponseWriter, _ *http.Request) {
@@ -505,12 +1015,26 @@ func (s *server) websocket(w http.ResponseWriter, r *http.Request) {
 		if json.Unmarshal(data, &command) != nil {
 			continue
 		}
-		if command.Type == "subscribe" && command.ThreadID != "" {
+		switch command.Type {
+		case "subscribe":
+			if command.ThreadID == "" {
+				continue
+			}
 			subscribeCtx, subscribeCancel := context.WithTimeout(ctx, 15*time.Second)
 			_, err := s.ensureThread(subscribeCtx, command.ThreadID)
 			subscribeCancel()
 			if err != nil {
 				s.codex.hub.broadcast(map[string]any{"type": "subscriptionError", "threadId": command.ThreadID, "message": err.Error()})
+				continue
+			}
+			snapshot, _ := json.Marshal(s.codex.runtimeSnapshot(command.ThreadID))
+			select {
+			case events <- snapshot:
+			default:
+			}
+		case "approval/decide":
+			if err := s.codex.resolveApproval(command.ApprovalID, command.Decision); err != nil {
+				s.codex.hub.broadcast(map[string]any{"type": "approval/error", "approvalId": command.ApprovalID, "message": err.Error()})
 			}
 		}
 		select {
@@ -606,11 +1130,10 @@ func (s *server) threadHistory(w http.ResponseWriter, r *http.Request, threadID 
 	defer cancel()
 	var result struct {
 		Thread struct {
-			ID    string `json:"id"`
-			Name  string `json:"name"`
-			Turns []struct {
-				Items []json.RawMessage `json:"items"`
-			} `json:"turns"`
+			ID     string              `json:"id"`
+			Name   string              `json:"name"`
+			Status threadRuntimeStatus `json:"status"`
+			Turns  []threadTurn        `json:"turns"`
 		} `json:"thread"`
 	}
 	if err := s.codex.call(ctx, "thread/read", map[string]any{"threadId": threadID, "includeTurns": true}, &result); err != nil {
@@ -618,13 +1141,32 @@ func (s *server) threadHistory(w http.ResponseWriter, r *http.Request, threadID 
 		return
 	}
 
+	messages := normalizeHistoryWithRich(result.Thread.Turns, s.codex.richSnapshot(threadID))
+	runtime := s.codex.reconcileRuntime(threadID, result.Thread.Status, result.Thread.Turns)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"threadId": result.Thread.ID, "title": result.Thread.Name, "messages": messages, "runtime": runtime})
+}
+
+func normalizeHistory(turns []threadTurn) []historyMessage {
+	return normalizeHistoryWithRich(turns, nil)
+}
+
+func normalizeHistoryWithRich(turns []threadTurn, rich map[string][]historyMessage) []historyMessage {
 	messages := make([]historyMessage, 0)
-	for _, turn := range result.Thread.Turns {
+	for _, turn := range turns {
+		persisted := make([]historyMessage, 0, len(turn.Items))
 		for _, raw := range turn.Items {
 			var item struct {
-				Type    string `json:"type"`
-				Text    string `json:"text"`
-				Content []struct {
+				Type             string `json:"type"`
+				ID               string `json:"id"`
+				Text             string `json:"text"`
+				Command          string `json:"command"`
+				CWD              string `json:"cwd"`
+				AggregatedOutput string `json:"aggregatedOutput"`
+				Status           string `json:"status"`
+				ExitCode         *int   `json:"exitCode"`
+				DurationMs       *int64 `json:"durationMs"`
+				Content          []struct {
 					Type string `json:"type"`
 					Text string `json:"text"`
 				} `json:"content"`
@@ -640,28 +1182,93 @@ func (s *server) threadHistory(w http.ResponseWriter, r *http.Request, threadID 
 						parts = append(parts, input.Text)
 					}
 				}
-				appendHistory(&messages, "user", strings.Join(parts, "\n"))
+				text := strings.TrimSpace(strings.Join(parts, "\n"))
+				if text != "" {
+					persisted = append(persisted, historyMessage{ID: item.ID, ItemType: item.Type, Role: "user", Text: text})
+				}
 			case "agentMessage":
-				appendHistory(&messages, "assistant", item.Text)
+				if text := strings.TrimSpace(item.Text); text != "" {
+					persisted = append(persisted, historyMessage{ID: item.ID, ItemType: item.Type, Role: "assistant", Text: text})
+				}
+			case "commandExecution":
+				persisted = append(persisted, historyMessage{
+					Kind:       "command",
+					ID:         item.ID,
+					ItemType:   item.Type,
+					Command:    item.Command,
+					CWD:        item.CWD,
+					Output:     item.AggregatedOutput,
+					Status:     item.Status,
+					ExitCode:   item.ExitCode,
+					DurationMs: item.DurationMs,
+				})
 			}
 		}
+		messages = append(messages, mergeTimelineOrder(persisted, rich[turn.ID])...)
+		if turn.Status == "interrupted" {
+			messages = append(messages, historyMessage{
+				Kind:   "notice",
+				ID:     turn.ID,
+				Status: "interrupted",
+				Text:   "Conversation interrupted — tell the model what to do differently. Something went wrong? Use /feedback to report the issue.",
+			})
+		}
 	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"threadId": result.Thread.ID, "title": result.Thread.Name, "messages": messages})
+	return messages
 }
 
-func appendHistory(messages *[]historyMessage, role, text string) {
-	text = strings.TrimSpace(text)
-	if text == "" {
-		return
+// Merge the persisted item sequence with the live sequence using persisted
+// user/agent IDs as anchors. This preserves old history order while placing
+// bridge-only command items between the same messages seen by the CLI.
+func mergeTimelineOrder(persisted, live []historyMessage) []historyMessage {
+	ordered := make([]historyMessage, 0, len(persisted)+len(live))
+	emitted := make(map[string]bool, len(persisted)+len(live))
+	liveCursor := 0
+	appendVisible := func(item historyMessage) {
+		if item.Kind == "marker" || (item.ID != "" && emitted[item.ID]) {
+			return
+		}
+		if item.ID != "" {
+			emitted[item.ID] = true
+		}
+		ordered = append(ordered, item)
 	}
-	items := *messages
-	if len(items) > 0 && items[len(items)-1].Role == role {
-		items[len(items)-1].Text += "\n\n" + text
-		*messages = items
-		return
+
+	for _, persistedItem := range persisted {
+		match := -1
+		if persistedItem.ID != "" || persistedItem.Text != "" {
+			for index := liveCursor; index < len(live); index++ {
+				sameID := persistedItem.ID != "" && live[index].ID == persistedItem.ID
+				sameContent := persistedItem.ItemType != "" &&
+					live[index].ItemType == persistedItem.ItemType &&
+					strings.TrimSpace(persistedItem.Text) != "" &&
+					strings.TrimSpace(live[index].Text) == strings.TrimSpace(persistedItem.Text)
+				if sameID || sameContent {
+					match = index
+					break
+				}
+			}
+		}
+		if match < 0 {
+			appendVisible(persistedItem)
+			continue
+		}
+		for liveCursor < match {
+			appendVisible(live[liveCursor])
+			liveCursor++
+		}
+		if live[match].Kind == "command" && persistedItem.Kind == "command" {
+			appendVisible(live[match])
+		} else {
+			appendVisible(persistedItem)
+		}
+		liveCursor = match + 1
 	}
-	*messages = append(items, historyMessage{Role: role, Text: text})
+	for liveCursor < len(live) {
+		appendVisible(live[liveCursor])
+		liveCursor++
+	}
+	return ordered
 }
 
 func (s *server) chat(w http.ResponseWriter, r *http.Request) {
@@ -691,6 +1298,10 @@ func (s *server) chat(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
+	if s.codex.runtimeSnapshot(threadID).Working {
+		http.Error(w, "this thread already has an active turn", http.StatusConflict)
+		return
+	}
 	events := make(chan streamEvent, 1024)
 	s.codex.streamsMu.Lock()
 	if _, busy := s.codex.streams[threadID]; busy {
@@ -718,6 +1329,7 @@ func (s *server) chat(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "start turn: "+err.Error(), http.StatusBadGateway)
 		return
 	}
+	s.codex.setActiveTurn(threadID, started.Turn.ID, nil)
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -740,9 +1352,8 @@ func (s *server) chat(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		case <-ctx.Done():
-			interruptCtx, interruptCancel := context.WithTimeout(context.Background(), 3*time.Second)
-			_ = s.codex.call(interruptCtx, "turn/interrupt", map[string]string{"threadId": threadID, "turnId": started.Turn.ID}, nil)
-			interruptCancel()
+			// Browser navigation only detaches this SSE consumer. The shared turn
+			// remains alive and can be observed or interrupted after reconnecting.
 			return
 		case <-time.After(25 * time.Second):
 			_, _ = io.WriteString(w, ": keepalive\n\n")
@@ -759,7 +1370,7 @@ func (s *server) ensureThread(ctx context.Context, requested string) (string, er
 		s.codex.knownMu.Unlock()
 		if !known {
 			var resumed map[string]any
-			if err := s.codex.call(ctx, "thread/resume", map[string]any{"threadId": requested, "cwd": s.workspace, "sandbox": "workspace-write", "approvalPolicy": "never"}, &resumed); err != nil {
+			if err := s.codex.call(ctx, "thread/resume", map[string]any{"threadId": requested, "cwd": s.workspace, "sandbox": "workspace-write", "approvalPolicy": "on-request"}, &resumed); err != nil {
 				return "", fmt.Errorf("resume thread: %w", err)
 			}
 			s.codex.knownMu.Lock()
@@ -768,7 +1379,7 @@ func (s *server) ensureThread(ctx context.Context, requested string) (string, er
 		}
 		return requested, nil
 	}
-	params := map[string]any{"cwd": s.workspace, "runtimeWorkspaceRoots": []string{s.workspace}, "sandbox": "workspace-write", "approvalPolicy": "never", "ephemeral": false}
+	params := map[string]any{"cwd": s.workspace, "runtimeWorkspaceRoots": []string{s.workspace}, "sandbox": "workspace-write", "approvalPolicy": "on-request", "ephemeral": false}
 	if s.model != "" {
 		params["model"] = s.model
 	}
@@ -795,8 +1406,15 @@ func (s *server) interrupt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req interruptRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ThreadID == "" || req.TurnID == "" {
-		http.Error(w, "threadId and turnId are required", http.StatusBadRequest)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ThreadID == "" {
+		http.Error(w, "threadId is required", http.StatusBadRequest)
+		return
+	}
+	if req.TurnID == "" {
+		req.TurnID = s.codex.runtimeSnapshot(req.ThreadID).TurnID
+	}
+	if req.TurnID == "" {
+		http.Error(w, "the active turn id is unavailable", http.StatusConflict)
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)

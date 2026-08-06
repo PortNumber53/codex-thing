@@ -4,7 +4,36 @@ const STORAGE_KEY = 'codex-local-thread'
 
 function messagesMatch(left, right) {
   if (left.length !== right.length) return false
-  return left.every((message, index) => message.role === right[index]?.role && message.text === right[index]?.text)
+  const fields = ['kind', 'id', 'role', 'text', 'command', 'cwd', 'output', 'status', 'exitCode', 'durationMs']
+  return left.every((message, index) => fields.every(field => message[field] === right[index]?.[field]))
+}
+
+function appendAssistantDelta(items, text, itemId) {
+  let index = itemId ? items.findIndex(item => item.liveItemId === itemId) : -1
+  if (index < 0 && items.at(-1)?.role === 'assistant' && !items.at(-1)?.text) index = items.length - 1
+  if (index < 0) return [...items, { role: 'assistant', text, liveItemId: itemId }]
+  return items.map((item, itemIndex) => itemIndex === index ? { ...item, text: (item.text || '') + text, liveItemId: itemId || item.liveItemId } : item)
+}
+
+function upsertCommand(items, command, outputDelta = '') {
+  const withoutPlaceholder = items.at(-1)?.role === 'assistant' && !items.at(-1)?.text ? items.slice(0, -1) : items
+  const index = withoutPlaceholder.findIndex(item => item.kind === 'command' && item.id === command.id)
+  if (index < 0) return [...withoutPlaceholder, { kind: 'command', ...command, output: (command.output || '') + outputDelta }]
+  return withoutPlaceholder.map((item, itemIndex) => itemIndex === index ? {
+    ...item,
+    ...command,
+    output: command.output ?? ((item.output || '') + outputDelta),
+  } : item)
+}
+
+function appendInterruptedNotice(items, turn) {
+  if (items.some(item => item.kind === 'notice' && item.id === turn.id)) return items
+  return [...items, {
+    kind: 'notice',
+    id: turn.id,
+    status: 'interrupted',
+    text: 'Conversation interrupted — tell the model what to do differently. Something went wrong? Use /feedback to report the issue.',
+  }]
 }
 
 function Icon({ name, size = 18 }) {
@@ -18,6 +47,7 @@ function Icon({ name, size = 18 }) {
     stop: <><rect x="6" y="6" width="12" height="12" rx="2" /></>,
     copy: <><rect x="9" y="9" width="11" height="11" rx="2" /><path d="M15 9V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h3" /></>,
     check: <><path d="m5 12 4 4L19 6" /></>,
+    alert: <><path d="M12 9v4M12 17h.01" /><path d="M10.3 3.9 2.5 17.4A2 2 0 0 0 4.2 20h15.6a2 2 0 0 0 1.7-2.6L13.7 3.9a2 2 0 0 0-3.4 0Z" /></>,
   }
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>
 }
@@ -56,6 +86,55 @@ function CodeBlock({ code, language }) {
   </div>
 }
 
+function CommandCard({ item }) {
+  const [expanded, setExpanded] = useState(false)
+  const output = item.output || ''
+  const lines = output.split('\n')
+  const needsExpansion = lines.length > 14 || output.length > 2600
+  let visibleOutput = output
+  if (!expanded && needsExpansion) {
+    visibleOutput = lines.slice(0, 14).join('\n')
+    if (visibleOutput.length > 2600) visibleOutput = `${visibleOutput.slice(0, 2600)}…`
+  }
+  const failed = item.status === 'failed' || (item.exitCode != null && item.exitCode !== 0)
+  const running = item.status === 'inProgress'
+  const label = running ? 'Running' : failed ? 'Command failed' : item.status === 'declined' ? 'Command declined' : 'Ran'
+  const details = [item.exitCode != null ? `exit ${item.exitCode}` : '', item.durationMs != null ? `${(item.durationMs / 1000).toFixed(2)}s` : ''].filter(Boolean)
+
+  return <article className={`command-card ${failed ? 'failed' : ''} ${running ? 'running' : ''}`}>
+    <div className="command-title"><Icon name="terminal" size={15} /><strong>{label}</strong>{details.length > 0 && <span>{details.join(' · ')}</span>}</div>
+    <pre className="command-line"><code>{item.command || 'Command'}</code></pre>
+    {item.cwd && <div className="command-cwd">{item.cwd}</div>}
+    {output && <div className="command-output"><pre><code>{visibleOutput}</code></pre>{needsExpansion && <button onClick={() => setExpanded(value => !value)}>{expanded ? 'Collapse output' : `Show full output · ${lines.length} lines`}</button>}</div>}
+  </article>
+}
+
+function TranscriptItem({ item, index, isLast }) {
+  if (item.kind === 'command') return <CommandCard item={item} />
+  if (item.kind === 'notice') return <div className="system-notice"><Icon name="alert" size={16} /><div><strong>Conversation interrupted</strong><span>{item.text.replace(/^Conversation interrupted\s*[—-]\s*/i, '')}</span></div></div>
+  return <article className={`message ${item.role} ${item.error ? 'error' : ''}`}>
+    <div className="avatar">{item.role === 'user' ? 'Y' : <Icon name="spark" size={16} />}</div>
+    <div className="message-body"><div className="message-meta">{item.role === 'user' ? 'You' : 'Codex'}</div>{item.text ? <RichText text={item.text} /> : (isLast && <div className="thinking"><i /><i /><i /></div>)}</div>
+  </article>
+}
+
+function ApprovalCard({ approval, deciding, onDecision }) {
+  const rememberLabel = approval.proposedExecPrefix?.length
+    ? `Always allow ${approval.proposedExecPrefix.join(' ')}`
+    : 'Allow for this session'
+  return <section className="approval-card" role="alert" aria-label="Command approval required">
+    <div className="approval-head"><Icon name="alert" size={17} /><div><strong>Command approval required</strong><span>Environment: {approval.environment || 'local'}</span></div></div>
+    {approval.reason && <p className="approval-reason">{approval.reason}</p>}
+    <pre><code>{approval.command || 'Unknown command'}</code></pre>
+    {approval.cwd && <div className="approval-cwd">Working directory: {approval.cwd}</div>}
+    <div className="approval-actions">
+      <button className="approve" disabled={deciding} onClick={() => onDecision(approval.id, 'accept')}>Allow once</button>
+      <button disabled={deciding} onClick={() => onDecision(approval.id, 'always')}>{rememberLabel}</button>
+      <button className="deny" disabled={deciding} onClick={() => onDecision(approval.id, 'cancel')}>Deny and stop</button>
+    </div>
+  </section>
+}
+
 function EmptyState({ onPrompt }) {
   const prompts = [
     ['Explore this codebase', 'Map the architecture and important entry points.'],
@@ -84,11 +163,28 @@ export default function App() {
   const [sidebar, setSidebar] = useState(true)
   const [threads, setThreads] = useState([])
   const [loadingThread, setLoadingThread] = useState('')
+  const [approvals, setApprovals] = useState([])
+  const [approvalError, setApprovalError] = useState('')
+  const [decidingApproval, setDecidingApproval] = useState('')
   const endRef = useRef(null)
   const textareaRef = useRef(null)
   const socketRef = useRef(null)
   const threadIdRef = useRef(threadId)
   const workingRef = useRef(working)
+  const streamingRef = useRef(false)
+
+  const applyRuntimeSnapshot = runtime => {
+    if (!runtime || runtime.threadId !== threadIdRef.current) return
+    const isWorking = Boolean(runtime.working)
+    workingRef.current = isWorking
+    setWorking(isWorking)
+    setTurnId(runtime.turnId || '')
+    setApprovals(runtime.approvals || [])
+    setDecidingApproval(current => (runtime.approvals || []).some(item => item.id === current) ? current : '')
+    if (!isWorking) setActivity('')
+    else if ((runtime.activeFlags || []).includes('waitingOnApproval') || runtime.approvals?.length) setActivity('Waiting for approval')
+    else setActivity(current => current || 'Working')
+  }
 
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages, activity])
   useEffect(() => { threadIdRef.current = threadId }, [threadId])
@@ -150,24 +246,53 @@ export default function App() {
     } catch { /* health indicator already communicates connection errors */ }
   }
 
-  const handleRealtimeEvent = event => {
+  const handleRealtimeEvent = (event, { allowWhileWorking = false } = {}) => {
+    if (event.type === 'runtime/snapshot') {
+      applyRuntimeSnapshot(event)
+      return
+    }
+    if (event.type === 'approval/resolved') {
+      if (event.threadId === threadIdRef.current) {
+        setApprovals(current => current.filter(item => item.id !== event.approvalId))
+        setDecidingApproval('')
+        setApprovalError('')
+      }
+      return
+    }
+    if (event.type === 'approval/error') {
+      setDecidingApproval('')
+      setApprovalError(event.message || 'The approval could not be submitted.')
+      return
+    }
     if (event.type !== 'notification') return
     const { method, params = {} } = event
     if (['thread/started', 'thread/name/updated', 'thread/archived', 'thread/unarchived', 'thread/deleted'].includes(method)) refreshThreads()
-    if (!params.threadId || params.threadId !== threadIdRef.current || workingRef.current) return
+    if (!params.threadId || params.threadId !== threadIdRef.current || (streamingRef.current && !allowWhileWorking)) return
 
-    if (method === 'item/started' && params.item?.type === 'userMessage') {
+    if (method === 'turn/started') {
+      workingRef.current = true
+      setWorking(true)
+      setTurnId(params.turn?.id || '')
+      setActivity('Working')
+    } else if (method === 'item/started' && params.item?.type === 'userMessage') {
       const text = (params.item.content || []).filter(part => part.type === 'text').map(part => part.text).join('\n').trim()
       if (text) setMessages(current => current.at(-1)?.role === 'user' && current.at(-1)?.text === text ? current : [...current, { role: 'user', text }])
     } else if (method === 'item/agentMessage/delta') {
       setActivity('')
-      setMessages(current => {
-        const last = current.at(-1)
-        if (last?.role === 'assistant' && last.liveItemId === params.itemId) {
-          return current.map((message, index) => index === current.length - 1 ? { ...message, text: message.text + params.delta } : message)
-        }
-        return [...current, { role: 'assistant', text: params.delta, liveItemId: params.itemId }]
-      })
+      setMessages(current => appendAssistantDelta(current, params.delta, params.itemId))
+    } else if (method === 'item/commandExecution/outputDelta') {
+      setMessages(current => upsertCommand(current, { id: params.itemId, status: 'inProgress' }, params.delta))
+    } else if ((method === 'item/started' || method === 'item/completed') && params.item?.type === 'commandExecution') {
+      setActivity(method === 'item/started' ? `Running ${params.item.command || 'a command'}` : '')
+      setMessages(current => upsertCommand(current, {
+        id: params.item.id,
+        command: params.item.command,
+        cwd: params.item.cwd,
+        output: params.item.aggregatedOutput,
+        status: params.item.status,
+        exitCode: params.item.exitCode,
+        durationMs: params.item.durationMs,
+      }))
     } else if (method === 'item/started') {
       const labels = {
         commandExecution: `Running ${params.item.command || 'a command'}`,
@@ -179,14 +304,19 @@ export default function App() {
     } else if (method === 'item/completed' && params.item?.type === 'agentMessage') {
       setMessages(current => current.map(message => message.liveItemId === params.item.id ? { role: 'assistant', text: params.item.text } : message))
     } else if (method === 'turn/completed') {
+      workingRef.current = false
+      setWorking(false)
+      setTurnId('')
+      setApprovals([])
       setActivity('')
-      openThread(threadIdRef.current, { silent: true })
+      if (params.turn?.status === 'interrupted') setMessages(current => appendInterruptedNotice(current, params.turn))
+      if (!allowWhileWorking) openThread(threadIdRef.current, { silent: true })
       refreshThreads()
     }
   }
 
-  const openThread = async (id, { silent = false } = {}) => {
-    if (!id || workingRef.current) return
+  const openThread = async (id, { silent = false, force = false } = {}) => {
+    if (!id || (workingRef.current && !force)) return
     if (!silent) setLoadingThread(id)
     try {
       const response = await fetch(`/api/threads/${encodeURIComponent(id)}`)
@@ -195,8 +325,8 @@ export default function App() {
       const incoming = data.messages || []
       setMessages(current => messagesMatch(current, incoming) ? current : incoming)
       setThreadId(data.threadId || id)
-      setTurnId('')
-      setActivity('')
+      threadIdRef.current = data.threadId || id
+      applyRuntimeSnapshot(data.runtime || { threadId: data.threadId || id, working: false, approvals: [] })
       localStorage.setItem(STORAGE_KEY, data.threadId || id)
     } catch (error) {
       if (!silent) setMessages([{ role: 'assistant', text: `I couldn't load that session: ${error.message}`, error: true }])
@@ -211,6 +341,8 @@ export default function App() {
     setThreadId('')
     setTurnId('')
     setActivity('')
+    setApprovals([])
+    setApprovalError('')
     localStorage.removeItem(STORAGE_KEY)
     textareaRef.current?.focus()
   }
@@ -219,6 +351,7 @@ export default function App() {
     const text = (typeof preset === 'string' ? preset : input).trim()
     if (!text || working) return
     setInput('')
+    streamingRef.current = true
     setWorking(true)
     setActivity('Thinking')
     setMessages(current => [...current, { role: 'user', text }, { role: 'assistant', text: '' }])
@@ -241,13 +374,19 @@ export default function App() {
         const payload = JSON.parse(dataLines.join('\n'))
         if (eventName === 'ready') {
           setThreadId(payload.threadId)
+          threadIdRef.current = payload.threadId
           setTurnId(payload.turnId)
           localStorage.setItem(STORAGE_KEY, payload.threadId)
         } else if (eventName === 'delta') {
           setActivity('')
-          setMessages(current => current.map((m, i) => i === current.length - 1 ? { ...m, text: m.text + payload.text } : m))
+          setMessages(current => appendAssistantDelta(current, payload.text, payload.itemId))
         } else if (eventName === 'activity') {
           setActivity(payload.label)
+        } else if (eventName === 'protocol') {
+          const richMethod = payload.method === 'item/commandExecution/outputDelta' ||
+            ((payload.method === 'item/started' || payload.method === 'item/completed') && payload.params?.item?.type === 'commandExecution') ||
+            (payload.method === 'turn/completed' && payload.params?.turn?.status === 'interrupted')
+          if (richMethod) handleRealtimeEvent(payload, { allowWhileWorking: true })
         } else if (eventName === 'error') {
           throw new Error(payload.message)
         }
@@ -266,19 +405,36 @@ export default function App() {
         if (done) break
       }
     } catch (error) {
-      setMessages(current => current.map((m, i) => i === current.length - 1 ? { ...m, text: m.text || `I couldn't complete that turn: ${error.message}`, error: true } : m))
+      setMessages(current => {
+        const text = `I couldn't complete that turn: ${error.message}`
+        if (current.at(-1)?.role === 'assistant' && !current.at(-1)?.text) return current.map((item, index) => index === current.length - 1 ? { ...item, text, error: true } : item)
+        return [...current, { role: 'assistant', text, error: true }]
+      })
     } finally {
+      streamingRef.current = false
+      workingRef.current = false
       setWorking(false)
       setActivity('')
       setTurnId('')
+      if (threadIdRef.current) await openThread(threadIdRef.current, { silent: true, force: true })
       refreshThreads()
       textareaRef.current?.focus()
     }
   }
 
   const stop = async () => {
-    if (!threadId || !turnId) return
+    if (!threadId) return
     await fetch('/api/interrupt', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ threadId, turnId }) })
+  }
+
+  const decideApproval = (approvalId, decision) => {
+    if (!approvalId || socketRef.current?.readyState !== WebSocket.OPEN) {
+      setApprovalError('The realtime connection is not ready. Reconnect and try again.')
+      return
+    }
+    setApprovalError('')
+    setDecidingApproval(approvalId)
+    socketRef.current.send(JSON.stringify({ type: 'approval/decide', approvalId, decision }))
   }
 
   const keyDown = (event) => {
@@ -312,16 +468,17 @@ export default function App() {
 
       <section className="conversation">
         {!messages.length ? <EmptyState onPrompt={send} /> : <div className="message-list">
-          {messages.map((message, index) => <article className={`message ${message.role} ${message.error ? 'error' : ''}`} key={index}>
-            <div className="avatar">{message.role === 'user' ? 'Y' : <Icon name="spark" size={16} />}</div>
-            <div className="message-body"><div className="message-meta">{message.role === 'user' ? 'You' : 'Codex'}</div>{message.text ? <RichText text={message.text} /> : (index === messages.length - 1 && <div className="thinking"><i /><i /><i /></div>)}</div>
-          </article>)}
+          {messages.map((message, index) => <TranscriptItem item={message} index={index} isLast={index === messages.length - 1} key={message.id ? `${message.kind || message.role}-${message.id}` : index} />)}
           {activity && <div className="activity"><span className="spinner" />{activity}</div>}
           <div ref={endRef} />
         </div>}
       </section>
 
       <footer>
+        {approvals.length > 0 && <div className="approval-stack">
+          {approvals.map(approval => <ApprovalCard key={approval.id} approval={approval} deciding={decidingApproval === approval.id} onDecision={decideApproval} />)}
+          {approvalError && <p className="approval-error">{approvalError}</p>}
+        </div>}
         <div className={`composer ${working ? 'working' : ''}`}>
           <textarea ref={textareaRef} value={input} onChange={e => setInput(e.target.value)} onKeyDown={keyDown} placeholder="Ask Codex to build, explain, or debug…" rows={1} disabled={working} />
           <div className="composer-row"><span>↵ send &nbsp;·&nbsp; ⇧↵ new line</span>{working ? <button className="send stop" onClick={stop} aria-label="Stop"><Icon name="stop" size={16} /></button> : <button className="send" onClick={() => send()} disabled={!input.trim() || status !== 'ready'} aria-label="Send"><Icon name="send" size={17} /></button>}</div>
