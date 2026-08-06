@@ -922,8 +922,9 @@ type browserCommand struct {
 	Decision   string `json:"decision"`
 }
 type chatRequest struct {
-	Message  string `json:"message"`
-	ThreadID string `json:"threadId"`
+	Message   string `json:"message"`
+	ThreadID  string `json:"threadId"`
+	Workspace string `json:"workspace"`
 }
 type interruptRequest struct {
 	ThreadID string `json:"threadId"`
@@ -936,6 +937,12 @@ type threadSummary struct {
 	Preview   string `json:"preview"`
 	UpdatedAt int64  `json:"updatedAt"`
 	Status    any    `json:"status"`
+	CWD       string `json:"cwd,omitempty"`
+}
+
+type workspaceSuggestion struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
 }
 
 type historyMessage struct {
@@ -965,6 +972,26 @@ func (s *server) health(w http.ResponseWriter, _ *http.Request) {
 		state = "ready"
 	}
 	_ = json.NewEncoder(w).Encode(map[string]string{"codex": state, "workspace": s.workspace, "appServer": s.codex.endpoint})
+}
+
+func (s *server) completeWorkspaces(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	requested := r.URL.Query().Get("path")
+	if len(requested) > 4096 {
+		http.Error(w, "workspace path is too long", http.StatusBadRequest)
+		return
+	}
+	suggestions, err := completeWorkspacePaths(requested, s.workspace)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(map[string]any{"suggestions": suggestions})
 }
 
 func (s *server) websocket(w http.ResponseWriter, r *http.Request) {
@@ -1021,7 +1048,7 @@ func (s *server) websocket(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			subscribeCtx, subscribeCancel := context.WithTimeout(ctx, 15*time.Second)
-			_, err := s.ensureThread(subscribeCtx, command.ThreadID)
+			_, err := s.ensureThread(subscribeCtx, command.ThreadID, "")
 			subscribeCancel()
 			if err != nil {
 				s.codex.hub.broadcast(map[string]any{"type": "subscriptionError", "threadId": command.ThreadID, "message": err.Error()})
@@ -1063,6 +1090,11 @@ func (s *server) threads(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
+	workspace, err := resolveWorkspace(r.URL.Query().Get("cwd"), s.workspace)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	var result struct {
 		Data []struct {
 			ID        string `json:"id"`
@@ -1070,10 +1102,11 @@ func (s *server) threads(w http.ResponseWriter, r *http.Request) {
 			Preview   string `json:"preview"`
 			UpdatedAt int64  `json:"updatedAt"`
 			Status    any    `json:"status"`
+			CWD       string `json:"cwd"`
 		} `json:"data"`
 	}
-	err := s.codex.call(ctx, "thread/list", map[string]any{
-		"cwd":           s.workspace,
+	err = s.codex.call(ctx, "thread/list", map[string]any{
+		"cwd":           workspace,
 		"limit":         40,
 		"sortKey":       "updated_at",
 		"sortDirection": "desc",
@@ -1090,35 +1123,38 @@ func (s *server) threads(w http.ResponseWriter, r *http.Request) {
 		if title == "" {
 			title = truncate(firstNonEmpty(item.Preview, "Untitled conversation"), 58)
 		}
-		threads = append(threads, threadSummary{ID: item.ID, Title: title, Preview: item.Preview, UpdatedAt: item.UpdatedAt, Status: item.Status})
+		threads = append(threads, threadSummary{ID: item.ID, Title: title, Preview: item.Preview, UpdatedAt: item.UpdatedAt, Status: item.Status, CWD: item.CWD})
 		seen[item.ID] = true
 	}
-	for index := len(s.bootstrapThreads) - 1; index >= 0; index-- {
-		id := s.bootstrapThreads[index]
-		if seen[id] {
-			continue
+	if workspace == s.workspace {
+		for index := len(s.bootstrapThreads) - 1; index >= 0; index-- {
+			id := s.bootstrapThreads[index]
+			if seen[id] {
+				continue
+			}
+			var pinned struct {
+				Thread struct {
+					ID        string `json:"id"`
+					Name      string `json:"name"`
+					Preview   string `json:"preview"`
+					UpdatedAt int64  `json:"updatedAt"`
+					Status    any    `json:"status"`
+					CWD       string `json:"cwd"`
+				} `json:"thread"`
+			}
+			if err := s.codex.call(ctx, "thread/read", map[string]any{"threadId": id, "includeTurns": false}, &pinned); err != nil {
+				log.Printf("read bootstrap thread %s: %v", id, err)
+				continue
+			}
+			title := strings.TrimSpace(pinned.Thread.Name)
+			if title == "" {
+				title = truncate(firstNonEmpty(pinned.Thread.Preview, "Bootstrap conversation"), 58)
+			}
+			threads = append([]threadSummary{{ID: pinned.Thread.ID, Title: title, Preview: pinned.Thread.Preview, UpdatedAt: pinned.Thread.UpdatedAt, Status: pinned.Thread.Status, CWD: pinned.Thread.CWD}}, threads...)
 		}
-		var pinned struct {
-			Thread struct {
-				ID        string `json:"id"`
-				Name      string `json:"name"`
-				Preview   string `json:"preview"`
-				UpdatedAt int64  `json:"updatedAt"`
-				Status    any    `json:"status"`
-			} `json:"thread"`
-		}
-		if err := s.codex.call(ctx, "thread/read", map[string]any{"threadId": id, "includeTurns": false}, &pinned); err != nil {
-			log.Printf("read bootstrap thread %s: %v", id, err)
-			continue
-		}
-		title := strings.TrimSpace(pinned.Thread.Name)
-		if title == "" {
-			title = truncate(firstNonEmpty(pinned.Thread.Preview, "Bootstrap conversation"), 58)
-		}
-		threads = append([]threadSummary{{ID: pinned.Thread.ID, Title: title, Preview: pinned.Thread.Preview, UpdatedAt: pinned.Thread.UpdatedAt, Status: pinned.Thread.Status}}, threads...)
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"threads": threads})
+	_ = json.NewEncoder(w).Encode(map[string]any{"threads": threads, "workspace": workspace})
 }
 
 func (s *server) threadHistory(w http.ResponseWriter, r *http.Request, threadID string) {
@@ -1132,6 +1168,7 @@ func (s *server) threadHistory(w http.ResponseWriter, r *http.Request, threadID 
 		Thread struct {
 			ID     string              `json:"id"`
 			Name   string              `json:"name"`
+			CWD    string              `json:"cwd"`
 			Status threadRuntimeStatus `json:"status"`
 			Turns  []threadTurn        `json:"turns"`
 		} `json:"thread"`
@@ -1144,7 +1181,7 @@ func (s *server) threadHistory(w http.ResponseWriter, r *http.Request, threadID 
 	messages := normalizeHistoryWithRich(result.Thread.Turns, s.codex.richSnapshot(threadID))
 	runtime := s.codex.reconcileRuntime(threadID, result.Thread.Status, result.Thread.Turns)
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"threadId": result.Thread.ID, "title": result.Thread.Name, "messages": messages, "runtime": runtime})
+	_ = json.NewEncoder(w).Encode(map[string]any{"threadId": result.Thread.ID, "title": result.Thread.Name, "workspace": result.Thread.CWD, "messages": messages, "runtime": runtime})
 }
 
 func normalizeHistory(turns []threadTurn) []historyMessage {
@@ -1293,7 +1330,16 @@ func (s *server) chat(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
-	threadID, err := s.ensureThread(ctx, req.ThreadID)
+	workspace := ""
+	if strings.TrimSpace(req.ThreadID) == "" {
+		var err error
+		workspace, err = resolveWorkspace(req.Workspace, s.workspace)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	threadID, err := s.ensureThread(ctx, req.ThreadID, workspace)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
@@ -1340,7 +1386,7 @@ func (s *server) chat(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache, no-transform")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
-	sse(w, "ready", map[string]string{"threadId": threadID, "turnId": started.Turn.ID})
+	sse(w, "ready", map[string]string{"threadId": threadID, "turnId": started.Turn.ID, "workspace": workspace})
 	flusher.Flush()
 
 	for {
@@ -1362,7 +1408,7 @@ func (s *server) chat(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *server) ensureThread(ctx context.Context, requested string) (string, error) {
+func (s *server) ensureThread(ctx context.Context, requested, workspace string) (string, error) {
 	requested = strings.TrimSpace(requested)
 	if requested != "" {
 		s.codex.knownMu.Lock()
@@ -1370,7 +1416,7 @@ func (s *server) ensureThread(ctx context.Context, requested string) (string, er
 		s.codex.knownMu.Unlock()
 		if !known {
 			var resumed map[string]any
-			if err := s.codex.call(ctx, "thread/resume", map[string]any{"threadId": requested, "cwd": s.workspace, "sandbox": "workspace-write", "approvalPolicy": "on-request"}, &resumed); err != nil {
+			if err := s.codex.call(ctx, "thread/resume", map[string]any{"threadId": requested, "sandbox": "workspace-write", "approvalPolicy": "on-request"}, &resumed); err != nil {
 				return "", fmt.Errorf("resume thread: %w", err)
 			}
 			s.codex.knownMu.Lock()
@@ -1379,7 +1425,10 @@ func (s *server) ensureThread(ctx context.Context, requested string) (string, er
 		}
 		return requested, nil
 	}
-	params := map[string]any{"cwd": s.workspace, "runtimeWorkspaceRoots": []string{s.workspace}, "sandbox": "workspace-write", "approvalPolicy": "on-request", "ephemeral": false}
+	if workspace == "" {
+		workspace = s.workspace
+	}
+	params := map[string]any{"cwd": workspace, "runtimeWorkspaceRoots": []string{workspace}, "sandbox": "workspace-write", "approvalPolicy": "on-request", "ephemeral": false}
 	if s.model != "" {
 		params["model"] = s.model
 	}
@@ -1398,6 +1447,76 @@ func (s *server) ensureThread(ctx context.Context, requested string) (string, er
 	s.codex.known[started.Thread.ID] = true
 	s.codex.knownMu.Unlock()
 	return started.Thread.ID, nil
+}
+
+func resolveWorkspace(requested, fallback string) (string, error) {
+	requested = strings.TrimSpace(requested)
+	if requested == "" {
+		requested = fallback
+	}
+	if !filepath.IsAbs(requested) {
+		return "", errors.New("workspace path must be absolute")
+	}
+	resolved, err := filepath.Abs(filepath.Clean(requested))
+	if err != nil {
+		return "", fmt.Errorf("resolve workspace path: %w", err)
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return "", fmt.Errorf("workspace path is unavailable: %w", err)
+	}
+	if !info.IsDir() {
+		return "", errors.New("workspace path must be a directory")
+	}
+	return resolved, nil
+}
+
+func completeWorkspacePaths(requested, fallback string) ([]workspaceSuggestion, error) {
+	requested = strings.TrimSpace(requested)
+	if requested == "" {
+		requested = filepath.Dir(fallback) + string(os.PathSeparator)
+	}
+	if !filepath.IsAbs(requested) {
+		return nil, errors.New("workspace path must be absolute")
+	}
+
+	cleaned := filepath.Clean(requested)
+	searchDir := cleaned
+	prefix := ""
+	if info, err := os.Stat(cleaned); err != nil || !info.IsDir() {
+		searchDir = filepath.Dir(cleaned)
+		prefix = filepath.Base(cleaned)
+	}
+	entries, err := os.ReadDir(searchDir)
+	if err != nil {
+		return nil, fmt.Errorf("list workspace paths: %w", err)
+	}
+
+	prefix = strings.ToLower(prefix)
+	suggestions := make([]workspaceSuggestion, 0, 40)
+	for _, entry := range entries {
+		if !strings.HasPrefix(strings.ToLower(entry.Name()), prefix) {
+			continue
+		}
+		path := filepath.Join(searchDir, entry.Name())
+		isDir := entry.IsDir()
+		if !isDir && entry.Type()&os.ModeSymlink != 0 {
+			if info, statErr := os.Stat(path); statErr == nil {
+				isDir = info.IsDir()
+			}
+		}
+		if !isDir {
+			continue
+		}
+		suggestions = append(suggestions, workspaceSuggestion{Name: entry.Name(), Path: path})
+		if len(suggestions) == 40 {
+			break
+		}
+	}
+	sort.Slice(suggestions, func(i, j int) bool {
+		return strings.ToLower(suggestions[i].Path) < strings.ToLower(suggestions[j].Path)
+	})
+	return suggestions, nil
 }
 
 func (s *server) interrupt(w http.ResponseWriter, r *http.Request) {
@@ -1471,7 +1590,7 @@ func main() {
 	s := &server{codex: codex, workspace: absWorkspace, model: os.Getenv("CODEX_MODEL"), bootstrapThreads: bootstrapThreads}
 	for _, threadID := range bootstrapThreads {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-		_, resumeErr := s.ensureThread(ctx, threadID)
+		_, resumeErr := s.ensureThread(ctx, threadID, "")
 		cancel()
 		if resumeErr != nil {
 			log.Printf("bootstrap thread %s could not be resumed: %v", threadID, resumeErr)
@@ -1482,6 +1601,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/health", s.health)
+	mux.HandleFunc("/api/workspaces/complete", s.completeWorkspaces)
 	mux.HandleFunc("/api/ws", s.websocket)
 	mux.HandleFunc("/api/threads", s.threads)
 	mux.HandleFunc("/api/threads/", s.threads)

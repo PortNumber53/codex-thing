@@ -2,6 +2,18 @@ import { useEffect, useRef, useState } from 'react'
 
 const STORAGE_KEY = 'codex-local-thread'
 
+function workspaceName(path) {
+  const parts = (path || '').split('/').filter(Boolean)
+  return parts.at(-1) || 'Workspace'
+}
+
+function workspaceParent(path) {
+  const normalized = (path || '').replace(/\/+$/, '')
+  const separator = normalized.lastIndexOf('/')
+  if (separator <= 0) return '/'
+  return `${normalized.slice(0, separator)}/`
+}
+
 function messagesMatch(left, right) {
   if (left.length !== right.length) return false
   const fields = ['kind', 'id', 'role', 'text', 'command', 'cwd', 'output', 'status', 'exitCode', 'durationMs']
@@ -166,12 +178,23 @@ export default function App() {
   const [approvals, setApprovals] = useState([])
   const [approvalError, setApprovalError] = useState('')
   const [decidingApproval, setDecidingApproval] = useState('')
+  const [defaultWorkspace, setDefaultWorkspace] = useState('')
+  const [workspace, setWorkspace] = useState('')
+  const [differentWorkspace, setDifferentWorkspace] = useState(false)
+  const [workspaceInput, setWorkspaceInput] = useState('')
+  const [workspaceError, setWorkspaceError] = useState('')
+  const [workspaceSuggestions, setWorkspaceSuggestions] = useState([])
+  const [workspaceFocused, setWorkspaceFocused] = useState(false)
+  const [workspaceSuggestionIndex, setWorkspaceSuggestionIndex] = useState(-1)
+  const [workspaceSuggestionsLoading, setWorkspaceSuggestionsLoading] = useState(false)
   const endRef = useRef(null)
   const textareaRef = useRef(null)
   const socketRef = useRef(null)
   const threadIdRef = useRef(threadId)
   const workingRef = useRef(working)
   const streamingRef = useRef(false)
+  const workspaceRef = useRef(workspace)
+  const defaultWorkspaceRef = useRef(defaultWorkspace)
 
   const applyRuntimeSnapshot = runtime => {
     if (!runtime || runtime.threadId !== threadIdRef.current) return
@@ -189,12 +212,47 @@ export default function App() {
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages, activity])
   useEffect(() => { threadIdRef.current = threadId }, [threadId])
   useEffect(() => { workingRef.current = working }, [working])
+  useEffect(() => { workspaceRef.current = workspace }, [workspace])
+  useEffect(() => {
+    if (!differentWorkspace || !workspaceInput.trim()) {
+      setWorkspaceSuggestions([])
+      setWorkspaceSuggestionsLoading(false)
+      return
+    }
+    const controller = new AbortController()
+    const timer = setTimeout(async () => {
+      setWorkspaceSuggestionsLoading(true)
+      try {
+        const response = await fetch(`/api/workspaces/complete?path=${encodeURIComponent(workspaceInput.trim())}`, { signal: controller.signal })
+        if (!response.ok) throw new Error(await response.text())
+        const data = await response.json()
+        setWorkspaceSuggestions(data.suggestions || [])
+        setWorkspaceSuggestionIndex(-1)
+      } catch (error) {
+        if (error.name !== 'AbortError') setWorkspaceSuggestions([])
+      } finally {
+        if (!controller.signal.aborted) setWorkspaceSuggestionsLoading(false)
+      }
+    }, 160)
+    return () => {
+      clearTimeout(timer)
+      controller.abort()
+    }
+  }, [differentWorkspace, workspaceInput])
   useEffect(() => {
     const check = async () => {
       try {
         const res = await fetch('/api/health')
         const data = await res.json()
         setStatus(data.codex === 'ready' ? 'ready' : 'offline')
+        if (data.workspace) {
+          defaultWorkspaceRef.current = data.workspace
+          setDefaultWorkspace(data.workspace)
+          if (!workspaceRef.current) {
+            workspaceRef.current = data.workspace
+            setWorkspace(data.workspace)
+          }
+        }
       } catch { setStatus('offline') }
     }
     check()
@@ -237,12 +295,17 @@ export default function App() {
     }
   }, [threadId])
 
-  const refreshThreads = async () => {
+  const refreshThreads = async (cwd = workspaceRef.current) => {
     try {
-      const response = await fetch('/api/threads')
+      const query = cwd ? `?cwd=${encodeURIComponent(cwd)}` : ''
+      const response = await fetch(`/api/threads${query}`)
       if (!response.ok) return
       const data = await response.json()
       setThreads(data.threads || [])
+      if (data.workspace && !workspaceRef.current) {
+        workspaceRef.current = data.workspace
+        setWorkspace(data.workspace)
+      }
     } catch { /* health indicator already communicates connection errors */ }
   }
 
@@ -326,6 +389,13 @@ export default function App() {
       setMessages(current => messagesMatch(current, incoming) ? current : incoming)
       setThreadId(data.threadId || id)
       threadIdRef.current = data.threadId || id
+      if (data.workspace) {
+        workspaceRef.current = data.workspace
+        setWorkspace(data.workspace)
+        setWorkspaceInput(data.workspace)
+        setDifferentWorkspace(Boolean(defaultWorkspaceRef.current && data.workspace !== defaultWorkspaceRef.current))
+        refreshThreads(data.workspace)
+      }
       applyRuntimeSnapshot(data.runtime || { threadId: data.threadId || id, working: false, approvals: [] })
       localStorage.setItem(STORAGE_KEY, data.threadId || id)
     } catch (error) {
@@ -337,6 +407,17 @@ export default function App() {
 
   const newChat = () => {
     if (working) return
+    const targetWorkspace = differentWorkspace ? workspaceInput.trim() : (defaultWorkspaceRef.current || defaultWorkspace)
+    if (differentWorkspace && !targetWorkspace) {
+      setWorkspaceError('Enter an absolute workspace path.')
+      return
+    }
+    setWorkspaceError('')
+    if (targetWorkspace) {
+      workspaceRef.current = targetWorkspace
+      setWorkspace(targetWorkspace)
+      refreshThreads(targetWorkspace)
+    }
     setMessages([])
     setThreadId('')
     setTurnId('')
@@ -350,6 +431,12 @@ export default function App() {
   const send = async (preset) => {
     const text = (typeof preset === 'string' ? preset : input).trim()
     if (!text || working) return
+    const targetWorkspace = threadId ? '' : (differentWorkspace ? workspaceInput.trim() : (workspace || defaultWorkspaceRef.current || defaultWorkspace))
+    if (!threadId && (!targetWorkspace || !targetWorkspace.startsWith('/'))) {
+      setWorkspaceError('Enter an absolute workspace path before starting the conversation.')
+      return
+    }
+    setWorkspaceError('')
     setInput('')
     streamingRef.current = true
     setWorking(true)
@@ -360,7 +447,7 @@ export default function App() {
       const response = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text, threadId }),
+        body: JSON.stringify({ message: text, threadId, workspace: targetWorkspace }),
       })
       if (!response.ok || !response.body) throw new Error((await response.text()) || `HTTP ${response.status}`)
 
@@ -376,6 +463,10 @@ export default function App() {
           setThreadId(payload.threadId)
           threadIdRef.current = payload.threadId
           setTurnId(payload.turnId)
+          if (payload.workspace) {
+            workspaceRef.current = payload.workspace
+            setWorkspace(payload.workspace)
+          }
           localStorage.setItem(STORAGE_KEY, payload.threadId)
         } else if (eventName === 'delta') {
           setActivity('')
@@ -437,6 +528,32 @@ export default function App() {
     socketRef.current.send(JSON.stringify({ type: 'approval/decide', approvalId, decision }))
   }
 
+  const selectWorkspaceSuggestion = suggestion => {
+    setWorkspaceInput(suggestion.path)
+    setWorkspaceError('')
+    setWorkspaceFocused(false)
+    setWorkspaceSuggestionIndex(-1)
+  }
+
+  const workspacePathKeyDown = event => {
+    if (!workspaceSuggestions.length) return
+    if (event.key === 'ArrowDown') {
+      event.preventDefault()
+      setWorkspaceFocused(true)
+      setWorkspaceSuggestionIndex(index => Math.min(index + 1, workspaceSuggestions.length - 1))
+    } else if (event.key === 'ArrowUp') {
+      event.preventDefault()
+      setWorkspaceFocused(true)
+      setWorkspaceSuggestionIndex(index => Math.max(index - 1, 0))
+    } else if (event.key === 'Enter' && workspaceSuggestionIndex >= 0) {
+      event.preventDefault()
+      selectWorkspaceSuggestion(workspaceSuggestions[workspaceSuggestionIndex])
+    } else if (event.key === 'Escape') {
+      setWorkspaceFocused(false)
+      setWorkspaceSuggestionIndex(-1)
+    }
+  }
+
   const keyDown = (event) => {
     if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); send() }
   }
@@ -445,8 +562,24 @@ export default function App() {
     <aside>
       <div className="brand"><div className="brand-mark"><Icon name="terminal" size={18} /></div><span>Codex <em>local</em></span></div>
       <button className="new-chat" onClick={newChat}><Icon name="plus" />New conversation</button>
+      <div className="workspace-choice">
+        <label><input type="checkbox" checked={differentWorkspace} onChange={event => {
+          const checked = event.target.checked
+          setDifferentWorkspace(checked)
+          setWorkspaceError('')
+          if (checked && !workspaceInput) setWorkspaceInput(workspaceParent(workspaceRef.current || defaultWorkspaceRef.current))
+        }} disabled={working} />Choose a different path</label>
+        {differentWorkspace && <div className="workspace-complete">
+          <input className="workspace-path" value={workspaceInput} onChange={event => { setWorkspaceInput(event.target.value); setWorkspaceError(''); setWorkspaceFocused(true) }} onFocus={() => setWorkspaceFocused(true)} onBlur={() => setWorkspaceFocused(false)} onKeyDown={workspacePathKeyDown} placeholder="/absolute/path/to/workspace" aria-label="Workspace path" role="combobox" aria-autocomplete="list" aria-expanded={workspaceFocused && (workspaceSuggestionsLoading || workspaceSuggestions.length > 0)} aria-controls="workspace-suggestions" aria-activedescendant={workspaceSuggestionIndex >= 0 ? `workspace-suggestion-${workspaceSuggestionIndex}` : undefined} disabled={working} />
+          {workspaceFocused && (workspaceSuggestionsLoading || workspaceSuggestions.length > 0) && <div className="workspace-suggestions" id="workspace-suggestions" role="listbox">
+            {workspaceSuggestionsLoading && <span>Loading directories…</span>}
+            {!workspaceSuggestionsLoading && workspaceSuggestions.map((suggestion, index) => <button id={`workspace-suggestion-${index}`} role="option" aria-selected={index === workspaceSuggestionIndex} className={index === workspaceSuggestionIndex ? 'active' : ''} key={suggestion.path} onMouseDown={event => { event.preventDefault(); selectWorkspaceSuggestion(suggestion) }}><strong>{suggestion.name}</strong><small>{suggestion.path}</small></button>)}
+          </div>}
+        </div>}
+        {workspaceError && <span className="workspace-error">{workspaceError}</span>}
+      </div>
       <div className="nav-label">WORKSPACE</div>
-      <button className="workspace" onClick={() => openThread(threadId || threads[0]?.id)} disabled={working || (!threadId && !threads.length)}><Icon name="code" /><div><strong>codex-thing</strong><span>/path/to/codex-thing</span></div></button>
+      <button className="workspace" onClick={() => openThread(threadId || threads[0]?.id)} disabled={working || (!threadId && !threads.length)}><Icon name="code" /><div><strong>{workspaceName(workspace || defaultWorkspace)}</strong><span>{workspace || defaultWorkspace || 'Loading workspace…'}</span></div></button>
       <div className="nav-label recent-label">RECENT SESSIONS</div>
       <div className="thread-list">
         {threads.map(thread => <button key={thread.id} className={thread.id === threadId ? 'active' : ''} onClick={() => openThread(thread.id)} disabled={working} title={thread.preview || thread.title}>

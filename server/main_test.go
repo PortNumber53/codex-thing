@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -186,5 +188,51 @@ func TestRuntimeSnapshotSurvivesBrowserReconnect(t *testing.T) {
 	}
 	if len(snapshot.Approvals) != 1 || snapshot.Approvals[0].Command != "npm run dev:server" {
 		t.Fatalf("pending approval was not restored: %#v", snapshot)
+	}
+}
+
+func TestResolveWorkspaceRequiresAbsoluteDirectory(t *testing.T) {
+	workspace := t.TempDir()
+	resolved, err := resolveWorkspace(workspace, "")
+	if err != nil || resolved != workspace {
+		t.Fatalf("expected valid workspace, got %q (%v)", resolved, err)
+	}
+	if _, err := resolveWorkspace("relative/path", workspace); err == nil {
+		t.Fatal("expected relative workspace to be rejected")
+	}
+	file := filepath.Join(workspace, "not-a-directory")
+	if err := os.WriteFile(file, []byte("test"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolveWorkspace(file, workspace); err == nil {
+		t.Fatal("expected file workspace to be rejected")
+	}
+}
+
+func TestCompleteWorkspacePathsReturnsMatchingDirectoriesOnly(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"alpha", "alpine", "beta"} {
+		if err := os.Mkdir(filepath.Join(root, name), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "also-a-file"), []byte("test"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	suggestions, err := completeWorkspacePaths(filepath.Join(root, "al"), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(suggestions) != 2 || suggestions[0].Name != "alpha" || suggestions[1].Name != "alpine" {
+		t.Fatalf("unexpected workspace suggestions: %#v", suggestions)
+	}
+	for _, suggestion := range suggestions {
+		if suggestion.Name == "also-a-file" {
+			t.Fatalf("file leaked into directory suggestions: %#v", suggestions)
+		}
+	}
+	if _, err := completeWorkspacePaths("relative", root); err == nil {
+		t.Fatal("expected relative completion path to be rejected")
 	}
 }
