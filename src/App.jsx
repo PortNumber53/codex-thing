@@ -131,18 +131,53 @@ function TranscriptItem({ item, index, isLast }) {
 }
 
 function ApprovalCard({ approval, deciding, onDecision }) {
+	const [answers, setAnswers] = useState({})
+	const setAnswer = (questionId, value) => setAnswers(current => ({ ...current, [questionId]: value }))
+	const kind = approval.kind || 'command'
+	if (kind === 'userInput') {
+		const questions = approval.questions || []
+		const complete = questions.every(question => (answers[question.id] || '').trim())
+		const submit = () => onDecision(approval.id, 'submit', {
+			answers: Object.fromEntries(questions.map(question => [question.id, [(answers[question.id] || '').trim()]])),
+		})
+		return <section className="approval-card" role="alert" aria-label="Codex needs your input">
+			<div className="approval-head"><Icon name="alert" size={17} /><div><strong>Codex needs your input</strong><span>Answer to continue this turn</span></div></div>
+			<div className="approval-questions">{questions.map(question => {
+				const selected = answers[question.id] || ''
+				return <fieldset key={question.id}>
+					{question.header && <legend>{question.header}</legend>}
+					<p>{question.question}</p>
+					{question.options?.length > 0 && <div className="approval-options">{question.options.map(option => <button type="button" className={selected === option.label ? 'selected' : ''} key={option.label} disabled={deciding} onClick={() => setAnswer(question.id, option.label)}><strong>{option.label}</strong>{option.description && <span>{option.description}</span>}</button>)}</div>}
+					<input type={question.isSecret ? 'password' : 'text'} value={selected} disabled={deciding} placeholder={question.options?.length ? 'Or type another answer' : 'Type your answer'} onChange={event => setAnswer(question.id, event.target.value)} />
+				</fieldset>
+			})}</div>
+			<div className="approval-actions"><button className="approve" disabled={deciding || !complete} onClick={submit}>{deciding ? 'Waiting for Codex…' : 'Submit answers'}</button></div>
+		</section>
+	}
+
   const rememberLabel = approval.proposedExecPrefix?.length
     ? `Always allow ${approval.proposedExecPrefix.join(' ')}`
     : 'Allow for this session'
-  return <section className="approval-card" role="alert" aria-label="Command approval required">
-    <div className="approval-head"><Icon name="alert" size={17} /><div><strong>Command approval required</strong><span>Environment: {approval.environment || 'local'}</span></div></div>
+	const headings = {
+		command: ['Command approval required', `Environment: ${approval.environment || 'local'}`],
+		fileChange: ['File-change approval required', 'Review the requested workspace edit'],
+		permissions: ['Additional permissions requested', `Environment: ${approval.environment || 'local'}`],
+		mcpElicitation: [`${approval.serverName || 'An MCP server'} needs your approval`, 'External tool request'],
+	}
+	const [title, subtitle] = headings[kind] || headings.command
+	return <section className="approval-card" role="alert" aria-label={title}>
+		<div className="approval-head"><Icon name="alert" size={17} /><div><strong>{title}</strong><span>{subtitle}</span></div></div>
     {approval.reason && <p className="approval-reason">{approval.reason}</p>}
-    <pre><code>{approval.command || 'Unknown command'}</code></pre>
+		{kind === 'command' && <pre><code>{approval.command || 'Unknown command'}</code></pre>}
+		{kind === 'fileChange' && <pre><code>{approval.grantRoot ? `Allow changes under ${approval.grantRoot}` : `Apply the pending file changes${approval.itemId ? ` (${approval.itemId})` : ''}`}</code></pre>}
+		{kind === 'permissions' && <pre><code>{JSON.stringify(approval.permissions || {}, null, 2)}</code></pre>}
+		{kind === 'mcpElicitation' && <p className="approval-reason">{approval.message || 'The MCP server requested additional information.'}</p>}
     {approval.cwd && <div className="approval-cwd">Working directory: {approval.cwd}</div>}
     <div className="approval-actions">
-      <button className="approve" disabled={deciding} onClick={() => onDecision(approval.id, 'accept')}>Allow once</button>
-      <button disabled={deciding} onClick={() => onDecision(approval.id, 'always')}>{rememberLabel}</button>
-      <button className="deny" disabled={deciding} onClick={() => onDecision(approval.id, 'cancel')}>Deny and stop</button>
+			<button className="approve" disabled={deciding} onClick={() => onDecision(approval.id, 'accept')}>{deciding ? 'Waiting for Codex…' : kind === 'fileChange' ? 'Apply changes' : kind === 'permissions' ? 'Grant for this turn' : kind === 'mcpElicitation' ? 'Allow' : 'Allow once'}</button>
+			{kind !== 'mcpElicitation' && <button disabled={deciding} onClick={() => onDecision(approval.id, 'always')}>{kind === 'fileChange' ? "Apply and don't ask again" : kind === 'permissions' ? 'Grant for this session' : rememberLabel}</button>}
+			{kind === 'mcpElicitation' && <button disabled={deciding} onClick={() => onDecision(approval.id, 'decline')}>Continue without it</button>}
+			<button className="deny" disabled={deciding} onClick={() => onDecision(approval.id, kind === 'permissions' ? 'decline' : 'cancel')}>{kind === 'permissions' ? 'Continue without permissions' : 'Deny and stop'}</button>
     </div>
   </section>
 }
@@ -320,6 +355,10 @@ export default function App() {
         setDecidingApproval('')
         setApprovalError('')
       }
+      return
+    }
+    if (event.type === 'approval/submitted') {
+      if (event.threadId === threadIdRef.current) setDecidingApproval(event.approvalId)
       return
     }
     if (event.type === 'approval/error') {
@@ -518,14 +557,14 @@ export default function App() {
     await fetch('/api/interrupt', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ threadId, turnId }) })
   }
 
-  const decideApproval = (approvalId, decision) => {
+  const decideApproval = (approvalId, decision, payload = {}) => {
     if (!approvalId || socketRef.current?.readyState !== WebSocket.OPEN) {
       setApprovalError('The realtime connection is not ready. Reconnect and try again.')
       return
     }
     setApprovalError('')
     setDecidingApproval(approvalId)
-    socketRef.current.send(JSON.stringify({ type: 'approval/decide', approvalId, decision }))
+    socketRef.current.send(JSON.stringify({ type: 'approval/decide', approvalId, decision, ...payload }))
   }
 
   const selectWorkspaceSuggestion = suggestion => {
@@ -609,7 +648,7 @@ export default function App() {
 
       <footer>
         {approvals.length > 0 && <div className="approval-stack">
-          {approvals.map(approval => <ApprovalCard key={approval.id} approval={approval} deciding={decidingApproval === approval.id} onDecision={decideApproval} />)}
+          {approvals.map(approval => <ApprovalCard key={approval.id} approval={approval} deciding={approval.submitted || decidingApproval === approval.id} onDecision={decideApproval} />)}
           {approvalError && <p className="approval-error">{approvalError}</p>}
         </div>}
         <div className={`composer ${working ? 'working' : ''}`}>

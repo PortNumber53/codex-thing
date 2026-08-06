@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -151,7 +152,7 @@ func TestApprovalResponsesMatchProtocolVersion(t *testing.T) {
 		Method:  "item/commandExecution/requestApproval",
 		Request: commandApproval{ProposedExecPrefix: []string{"npm", "run", "dev:server"}},
 	}
-	result, err := approvalResponse(modern, "always")
+	result, err := approvalResponse(modern, "always", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,9 +170,193 @@ func TestApprovalResponsesMatchProtocolVersion(t *testing.T) {
 	}
 
 	legacy := pendingApproval{Method: "execCommandApproval"}
-	result, err = approvalResponse(legacy, "accept")
+	result, err = approvalResponse(legacy, "accept", nil, nil)
 	if err != nil || result["decision"] != "approved" {
 		t.Fatalf("unexpected legacy approval response: %#v (%v)", result, err)
+	}
+}
+
+func TestBrowserApprovalWaitsForAppServerResolution(t *testing.T) {
+	received := make(chan []byte, 1)
+	httpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.CloseNow()
+		_, payload, err := conn.Read(r.Context())
+		if err == nil {
+			received <- payload
+		}
+	}))
+	defer httpServer.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(httpServer.URL, "http"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+
+	codex := &Codex{
+		conn:   conn,
+		hub:    newSocketHub(),
+		active: map[string]activeTurn{"thread-1": {TurnID: "turn-1", ActiveFlags: []string{"waitingOnApproval"}}},
+		approvals: map[string]pendingApproval{
+			"approval-1": {
+				Request: commandApproval{ID: "approval-1", ThreadID: "thread-1", TurnID: "turn-1", Command: "npm run build"},
+				Method:  "item/commandExecution/requestApproval",
+				RPCID:   json.RawMessage(`31`),
+			},
+		},
+	}
+	if err := codex.resolveApproval("approval-1", "accept", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case payload := <-received:
+		var response struct {
+			ID     int `json:"id"`
+			Result struct {
+				Decision string `json:"decision"`
+			} `json:"result"`
+		}
+		if err := json.Unmarshal(payload, &response); err != nil {
+			t.Fatal(err)
+		}
+		if response.ID != 31 || response.Result.Decision != "accept" {
+			t.Fatalf("unexpected app-server response: %s", payload)
+		}
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for app-server response")
+	}
+
+	snapshot := codex.runtimeSnapshot("thread-1")
+	if len(snapshot.Approvals) != 1 || !snapshot.Approvals[0].Submitted {
+		t.Fatalf("submitted approval should remain pending until app-server resolves it: %#v", snapshot.Approvals)
+	}
+	if len(snapshot.ActiveFlags) != 1 || snapshot.ActiveFlags[0] != "waitingOnApproval" {
+		t.Fatalf("approval wait state cleared before app-server resolution: %#v", snapshot.ActiveFlags)
+	}
+
+	codex.handleNotification("serverRequest/resolved", json.RawMessage(`{"threadId":"thread-1","requestId":31}`))
+	if got := codex.runtimeSnapshot("thread-1"); len(got.Approvals) != 0 || len(got.ActiveFlags) != 0 {
+		t.Fatalf("app-server resolution did not clear approval: %#v", got)
+	}
+}
+
+func TestInteractiveApprovalResponsesMatchProtocol(t *testing.T) {
+	fileChange, err := approvalResponse(
+		pendingApproval{Method: "item/fileChange/requestApproval"},
+		"always",
+		nil,
+		nil,
+	)
+	if err != nil || fileChange["decision"] != "acceptForSession" {
+		t.Fatalf("unexpected file-change response: %#v (%v)", fileChange, err)
+	}
+
+	requestedPermissions := map[string]any{
+		"network":    map[string]any{"enabled": true},
+		"fileSystem": map[string]any{"write": []any{"/workspace"}},
+	}
+	permissions, err := approvalResponse(
+		pendingApproval{
+			Method:  "item/permissions/requestApproval",
+			Request: commandApproval{Permissions: requestedPermissions},
+		},
+		"always",
+		nil,
+		nil,
+	)
+	if err != nil || permissions["scope"] != "session" {
+		t.Fatalf("unexpected permission response: %#v (%v)", permissions, err)
+	}
+	if permissions["permissions"] == nil {
+		t.Fatalf("granted permissions were omitted: %#v", permissions)
+	}
+	denied, err := approvalResponse(
+		pendingApproval{
+			Method:  "item/permissions/requestApproval",
+			Request: commandApproval{Permissions: requestedPermissions},
+		},
+		"decline",
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := denied["permissions"].(map[string]any); !ok || len(got) != 0 {
+		t.Fatalf("denied permissions should be empty: %#v", denied)
+	}
+
+	answers, err := approvalResponse(
+		pendingApproval{Method: "item/tool/requestUserInput"},
+		"submit",
+		map[string][]string{"strategy": {"Keep the patch small"}},
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, _ := json.Marshal(answers)
+	if string(encoded) != `{"answers":{"strategy":{"answers":["Keep the patch small"]}}}` {
+		t.Fatalf("unexpected user-input response: %s", encoded)
+	}
+}
+
+func TestHandleServerRequestCapturesEveryInteractivePromptKind(t *testing.T) {
+	tests := []struct {
+		method string
+		raw    string
+		kind   string
+	}{
+		{
+			method: "item/commandExecution/requestApproval",
+			raw:    `{"threadId":"thread-1","turnId":"turn-1","itemId":"command-1","command":"npm run build","proposedExecpolicyAmendment":{"command":["npm","run","build"]}}`,
+			kind:   "command",
+		},
+		{
+			method: "item/fileChange/requestApproval",
+			raw:    `{"threadId":"thread-1","turnId":"turn-1","itemId":"patch-1","reason":"Update generated files"}`,
+			kind:   "fileChange",
+		},
+		{
+			method: "item/permissions/requestApproval",
+			raw:    `{"threadId":"thread-1","turnId":"turn-1","itemId":"permissions-1","cwd":"/workspace","permissions":{"network":{"enabled":true}}}`,
+			kind:   "permissions",
+		},
+		{
+			method: "item/tool/requestUserInput",
+			raw:    `{"threadId":"thread-1","turnId":"turn-1","itemId":"question-1","questions":[{"id":"strategy","header":"Approach","question":"Which approach?","options":[{"label":"Small patch","description":"Keep scope narrow"}]}]}`,
+			kind:   "userInput",
+		},
+		{
+			method: "mcpServer/elicitation/request",
+			raw:    `{"threadId":"thread-1","turnId":"turn-1","serverName":"example","mode":"form","message":"Share configuration?","requestedSchema":{"type":"object","properties":{}}}`,
+			kind:   "mcpElicitation",
+		},
+	}
+
+	for index, test := range tests {
+		codex := &Codex{
+			hub:       newSocketHub(),
+			active:    make(map[string]activeTurn),
+			approvals: make(map[string]pendingApproval),
+		}
+		if !codex.handleServerRequest(json.RawMessage(strconv.Itoa(index+1)), test.method, json.RawMessage(test.raw)) {
+			t.Fatalf("%s was not handled", test.method)
+		}
+		snapshot := codex.runtimeSnapshot("thread-1")
+		if len(snapshot.Approvals) != 1 || snapshot.Approvals[0].Kind != test.kind {
+			t.Fatalf("unexpected %s snapshot: %#v", test.method, snapshot.Approvals)
+		}
+		if test.kind == "command" && strings.Join(snapshot.Approvals[0].ProposedExecPrefix, " ") != "npm run build" {
+			t.Fatalf("structured execpolicy amendment was not captured: %#v", snapshot.Approvals[0])
+		}
 	}
 }
 
@@ -188,6 +373,66 @@ func TestRuntimeSnapshotSurvivesBrowserReconnect(t *testing.T) {
 	}
 	if len(snapshot.Approvals) != 1 || snapshot.Approvals[0].Command != "npm run dev:server" {
 		t.Fatalf("pending approval was not restored: %#v", snapshot)
+	}
+}
+
+func TestServerRequestResolvedClearsApprovalAnsweredByAnotherClient(t *testing.T) {
+	codex := &Codex{
+		hub:    newSocketHub(),
+		active: map[string]activeTurn{"thread-1": {TurnID: "turn-1", ActiveFlags: []string{"waitingOnApproval"}}},
+		approvals: map[string]pendingApproval{
+			"approval-1": {
+				Request: commandApproval{ID: "approval-1", ThreadID: "thread-1", TurnID: "turn-1", Command: "npm run dev:server"},
+				RPCID:   json.RawMessage(`"request-7"`),
+			},
+		},
+	}
+	events := codex.hub.subscribe()
+	defer codex.hub.unsubscribe(events)
+
+	codex.handleNotification("serverRequest/resolved", json.RawMessage(`{"threadId":"thread-1","requestId":"request-7"}`))
+	snapshot := codex.runtimeSnapshot("thread-1")
+	if len(snapshot.Approvals) != 0 {
+		t.Fatalf("approval resolved by another client was not dismissed: %#v", snapshot.Approvals)
+	}
+	if strings.Join(snapshot.ActiveFlags, ",") != "" {
+		t.Fatalf("waiting-on-approval flag was not cleared: %#v", snapshot.ActiveFlags)
+	}
+	resolvedBroadcast := false
+	for range 3 {
+		var event struct {
+			Type       string `json:"type"`
+			ApprovalID string `json:"approvalId"`
+		}
+		if err := json.Unmarshal(<-events, &event); err != nil {
+			t.Fatal(err)
+		}
+		if event.Type == "approval/resolved" && event.ApprovalID == "approval-1" {
+			resolvedBroadcast = true
+		}
+	}
+	if !resolvedBroadcast {
+		t.Fatal("connected browsers were not notified that the approval resolved")
+	}
+}
+
+func TestServerRequestResolvedKeepsWaitingForAnotherApproval(t *testing.T) {
+	codex := &Codex{
+		hub:    newSocketHub(),
+		active: map[string]activeTurn{"thread-1": {TurnID: "turn-1", ActiveFlags: []string{"waitingOnApproval"}}},
+		approvals: map[string]pendingApproval{
+			"approval-1": {Request: commandApproval{ID: "approval-1", ThreadID: "thread-1"}, RPCID: json.RawMessage(`1`)},
+			"approval-2": {Request: commandApproval{ID: "approval-2", ThreadID: "thread-1"}, RPCID: json.RawMessage(`2`)},
+		},
+	}
+
+	codex.handleNotification("serverRequest/resolved", json.RawMessage(`{"threadId":"thread-1","requestId":1}`))
+	snapshot := codex.runtimeSnapshot("thread-1")
+	if len(snapshot.Approvals) != 1 || snapshot.Approvals[0].ID != "approval-2" {
+		t.Fatalf("unexpected remaining approvals: %#v", snapshot.Approvals)
+	}
+	if len(snapshot.ActiveFlags) != 1 || snapshot.ActiveFlags[0] != "waitingOnApproval" {
+		t.Fatalf("waiting-on-approval flag cleared too early: %#v", snapshot.ActiveFlags)
 	}
 }
 

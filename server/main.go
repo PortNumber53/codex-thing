@@ -57,21 +57,44 @@ type threadRuntimeStatus struct {
 }
 
 type commandApproval struct {
-	ID                 string   `json:"id"`
-	ThreadID           string   `json:"threadId"`
-	TurnID             string   `json:"turnId,omitempty"`
-	Command            string   `json:"command"`
-	CWD                string   `json:"cwd,omitempty"`
-	Environment        string   `json:"environment"`
-	Reason             string   `json:"reason,omitempty"`
-	ProposedExecPrefix []string `json:"proposedExecPrefix,omitempty"`
-	StartedAtMs        int64    `json:"startedAtMs"`
+	ID                 string          `json:"id"`
+	Kind               string          `json:"kind"`
+	ThreadID           string          `json:"threadId"`
+	TurnID             string          `json:"turnId,omitempty"`
+	ItemID             string          `json:"itemId,omitempty"`
+	Command            string          `json:"command"`
+	CWD                string          `json:"cwd,omitempty"`
+	Environment        string          `json:"environment"`
+	Reason             string          `json:"reason,omitempty"`
+	ProposedExecPrefix []string        `json:"proposedExecPrefix,omitempty"`
+	StartedAtMs        int64           `json:"startedAtMs"`
+	Submitted          bool            `json:"submitted,omitempty"`
+	GrantRoot          string          `json:"grantRoot,omitempty"`
+	Permissions        any             `json:"permissions,omitempty"`
+	Questions          []inputQuestion `json:"questions,omitempty"`
+	ServerName         string          `json:"serverName,omitempty"`
+	Message            string          `json:"message,omitempty"`
+}
+
+type inputOption struct {
+	Label       string `json:"label"`
+	Description string `json:"description,omitempty"`
+}
+
+type inputQuestion struct {
+	ID       string        `json:"id"`
+	Header   string        `json:"header,omitempty"`
+	Question string        `json:"question"`
+	IsOther  bool          `json:"isOther,omitempty"`
+	IsSecret bool          `json:"isSecret,omitempty"`
+	Options  []inputOption `json:"options,omitempty"`
 }
 
 type pendingApproval struct {
-	Request commandApproval
-	Method  string
-	RPCID   json.RawMessage
+	Request         commandApproval
+	Method          string
+	RPCID           json.RawMessage
+	SubmittedChoice string
 }
 
 type runtimeSnapshot struct {
@@ -359,34 +382,117 @@ func (c *Codex) readLoop() {
 func (c *Codex) handleServerRequest(rpcID json.RawMessage, method string, raw json.RawMessage) bool {
 	approval := commandApproval{
 		ID:          "approval-" + strconv.FormatInt(c.nextUIID.Add(1), 10),
+		Kind:        "command",
 		Environment: "local",
 		StartedAtMs: time.Now().UnixMilli(),
 	}
 	switch method {
 	case "item/commandExecution/requestApproval":
 		var params struct {
-			ThreadID                    string   `json:"threadId"`
-			TurnID                      string   `json:"turnId"`
-			Command                     string   `json:"command"`
-			CWD                         string   `json:"cwd"`
-			EnvironmentID               string   `json:"environmentId"`
-			Reason                      string   `json:"reason"`
-			ProposedExecpolicyAmendment []string `json:"proposedExecpolicyAmendment"`
-			StartedAtMs                 int64    `json:"startedAtMs"`
+			ThreadID                    string          `json:"threadId"`
+			TurnID                      string          `json:"turnId"`
+			ItemID                      string          `json:"itemId"`
+			Command                     string          `json:"command"`
+			CWD                         string          `json:"cwd"`
+			EnvironmentID               string          `json:"environmentId"`
+			Reason                      string          `json:"reason"`
+			ProposedExecpolicyAmendment json.RawMessage `json:"proposedExecpolicyAmendment"`
+			StartedAtMs                 int64           `json:"startedAtMs"`
 		}
 		if json.Unmarshal(raw, &params) != nil || params.ThreadID == "" {
 			return false
 		}
 		approval.ThreadID = params.ThreadID
 		approval.TurnID = params.TurnID
+		approval.ItemID = params.ItemID
 		approval.Command = params.Command
 		approval.CWD = params.CWD
 		approval.Environment = firstNonEmpty(params.EnvironmentID, "local")
 		approval.Reason = params.Reason
-		approval.ProposedExecPrefix = params.ProposedExecpolicyAmendment
+		approval.ProposedExecPrefix = execPolicyPrefix(params.ProposedExecpolicyAmendment)
 		if params.StartedAtMs != 0 {
 			approval.StartedAtMs = params.StartedAtMs
 		}
+	case "item/fileChange/requestApproval":
+		var params struct {
+			ThreadID    string `json:"threadId"`
+			TurnID      string `json:"turnId"`
+			ItemID      string `json:"itemId"`
+			StartedAtMs int64  `json:"startedAtMs"`
+			Reason      string `json:"reason"`
+			GrantRoot   string `json:"grantRoot"`
+		}
+		if json.Unmarshal(raw, &params) != nil || params.ThreadID == "" {
+			return false
+		}
+		approval.Kind = "fileChange"
+		approval.ThreadID = params.ThreadID
+		approval.TurnID = params.TurnID
+		approval.ItemID = params.ItemID
+		approval.Reason = params.Reason
+		approval.GrantRoot = params.GrantRoot
+		if params.StartedAtMs != 0 {
+			approval.StartedAtMs = params.StartedAtMs
+		}
+	case "item/permissions/requestApproval":
+		var params struct {
+			ThreadID      string          `json:"threadId"`
+			TurnID        string          `json:"turnId"`
+			ItemID        string          `json:"itemId"`
+			EnvironmentID string          `json:"environmentId"`
+			StartedAtMs   int64           `json:"startedAtMs"`
+			CWD           string          `json:"cwd"`
+			Reason        string          `json:"reason"`
+			Permissions   json.RawMessage `json:"permissions"`
+		}
+		if json.Unmarshal(raw, &params) != nil || params.ThreadID == "" || len(params.Permissions) == 0 {
+			return false
+		}
+		var permissions any
+		if json.Unmarshal(params.Permissions, &permissions) != nil {
+			return false
+		}
+		approval.Kind = "permissions"
+		approval.ThreadID = params.ThreadID
+		approval.TurnID = params.TurnID
+		approval.ItemID = params.ItemID
+		approval.Environment = firstNonEmpty(params.EnvironmentID, "local")
+		approval.CWD = params.CWD
+		approval.Reason = params.Reason
+		approval.Permissions = permissions
+		if params.StartedAtMs != 0 {
+			approval.StartedAtMs = params.StartedAtMs
+		}
+	case "item/tool/requestUserInput":
+		var params struct {
+			ThreadID  string          `json:"threadId"`
+			TurnID    string          `json:"turnId"`
+			ItemID    string          `json:"itemId"`
+			Questions []inputQuestion `json:"questions"`
+		}
+		if json.Unmarshal(raw, &params) != nil || params.ThreadID == "" || len(params.Questions) == 0 {
+			return false
+		}
+		approval.Kind = "userInput"
+		approval.ThreadID = params.ThreadID
+		approval.TurnID = params.TurnID
+		approval.ItemID = params.ItemID
+		approval.Questions = params.Questions
+	case "mcpServer/elicitation/request":
+		var params struct {
+			ThreadID   string `json:"threadId"`
+			TurnID     string `json:"turnId"`
+			ServerName string `json:"serverName"`
+			Message    string `json:"message"`
+		}
+		if json.Unmarshal(raw, &params) != nil || params.ThreadID == "" {
+			return false
+		}
+		approval.Kind = "mcpElicitation"
+		approval.ThreadID = params.ThreadID
+		approval.TurnID = params.TurnID
+		approval.ServerName = params.ServerName
+		approval.Message = params.Message
 	case "execCommandApproval":
 		var params struct {
 			ConversationID string   `json:"conversationId"`
@@ -398,6 +504,7 @@ func (c *Codex) handleServerRequest(rpcID json.RawMessage, method string, raw js
 			return false
 		}
 		approval.ThreadID = params.ConversationID
+		approval.Kind = "command"
 		approval.Command = strings.Join(params.Command, " ")
 		approval.CWD = params.CWD
 		approval.Reason = params.Reason
@@ -420,8 +527,26 @@ func (c *Codex) handleServerRequest(rpcID json.RawMessage, method string, raw js
 	active.ActiveFlags = addString(active.ActiveFlags, "waitingOnApproval")
 	c.active[approval.ThreadID] = active
 	c.stateMu.Unlock()
+	log.Printf("Codex approval request received: approval_id=%s request_id=%s thread_id=%s method=%s", approval.ID, rpcIDKey(rpcID), approval.ThreadID, method)
 	c.broadcastRuntime(approval.ThreadID)
 	return true
+}
+
+func execPolicyPrefix(raw json.RawMessage) []string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	var prefix []string
+	if json.Unmarshal(raw, &prefix) == nil {
+		return prefix
+	}
+	var amendment struct {
+		Command []string `json:"command"`
+	}
+	if json.Unmarshal(raw, &amendment) == nil {
+		return amendment.Command
+	}
+	return nil
 }
 
 func addString(items []string, value string) []string {
@@ -443,50 +568,105 @@ func removeString(items []string, value string) []string {
 	return result
 }
 
-func (c *Codex) resolveApproval(id, choice string) error {
+func (c *Codex) resolveApproval(id, choice string, answers map[string][]string, content map[string]any) error {
 	c.stateMu.Lock()
 	pending, ok := c.approvals[id]
 	if !ok {
 		c.stateMu.Unlock()
 		return errors.New("approval is no longer pending")
 	}
-	delete(c.approvals, id)
+	if pending.SubmittedChoice != "" {
+		c.stateMu.Unlock()
+		return errors.New("approval response is already being processed")
+	}
+	pending.SubmittedChoice = choice
+	c.approvals[id] = pending
 	c.stateMu.Unlock()
 
-	result, err := approvalResponse(pending, choice)
+	result, err := approvalResponse(pending, choice, answers, content)
 	if err != nil {
 		c.stateMu.Lock()
+		pending.SubmittedChoice = ""
 		c.approvals[id] = pending
 		c.stateMu.Unlock()
 		return err
 	}
+	log.Printf("submitting Codex approval response: approval_id=%s request_id=%s thread_id=%s choice=%s", id, rpcIDKey(pending.RPCID), pending.Request.ThreadID, choice)
 	if err := c.write(map[string]any{"id": pending.RPCID, "result": result}); err != nil {
 		c.stateMu.Lock()
+		pending.SubmittedChoice = ""
 		c.approvals[id] = pending
 		c.stateMu.Unlock()
+		log.Printf("Codex approval response failed: approval_id=%s request_id=%s: %v", id, rpcIDKey(pending.RPCID), err)
 		return err
+	}
+
+	// A successful websocket write only means that the response left this
+	// process. Keep the approval pending until app-server broadcasts
+	// serverRequest/resolved, which is also what dismisses it in remote TUIs.
+	c.hub.broadcast(map[string]any{"type": "approval/submitted", "threadId": pending.Request.ThreadID, "approvalId": id, "decision": choice})
+	c.broadcastRuntime(pending.Request.ThreadID)
+	return nil
+}
+
+func rpcIDKey(id json.RawMessage) string {
+	return strings.Trim(strings.TrimSpace(string(id)), `"`)
+}
+
+func (c *Codex) resolveApprovalFromNotification(raw json.RawMessage) {
+	var params struct {
+		ThreadID  string          `json:"threadId"`
+		RequestID json.RawMessage `json:"requestId"`
+	}
+	if json.Unmarshal(raw, &params) != nil || len(params.RequestID) == 0 {
+		return
+	}
+
+	requestKey := rpcIDKey(params.RequestID)
+	if requestKey == "" {
+		return
 	}
 
 	c.stateMu.Lock()
-	active := c.active[pending.Request.ThreadID]
+	resolvedID := ""
+	threadID := ""
+	for id, pending := range c.approvals {
+		if rpcIDKey(pending.RPCID) != requestKey {
+			continue
+		}
+		resolvedID = id
+		threadID = pending.Request.ThreadID
+		delete(c.approvals, id)
+		break
+	}
+	if resolvedID == "" {
+		c.stateMu.Unlock()
+		log.Printf("Codex approval resolution did not match a browser approval: request_id=%s thread_id=%s", requestKey, params.ThreadID)
+		return
+	}
+	if threadID == "" {
+		threadID = params.ThreadID
+	}
+	active := c.active[threadID]
 	stillWaiting := false
 	for _, other := range c.approvals {
-		if other.Request.ThreadID == pending.Request.ThreadID {
+		if other.Request.ThreadID == threadID {
 			stillWaiting = true
 			break
 		}
 	}
 	if !stillWaiting {
 		active.ActiveFlags = removeString(active.ActiveFlags, "waitingOnApproval")
-		c.active[pending.Request.ThreadID] = active
+		c.active[threadID] = active
 	}
 	c.stateMu.Unlock()
-	c.hub.broadcast(map[string]any{"type": "approval/resolved", "threadId": pending.Request.ThreadID, "approvalId": id, "decision": choice})
-	c.broadcastRuntime(pending.Request.ThreadID)
-	return nil
+
+	log.Printf("Codex approval resolved: approval_id=%s request_id=%s thread_id=%s", resolvedID, requestKey, threadID)
+	c.hub.broadcast(map[string]any{"type": "approval/resolved", "threadId": threadID, "approvalId": resolvedID})
+	c.broadcastRuntime(threadID)
 }
 
-func approvalResponse(pending pendingApproval, choice string) (map[string]any, error) {
+func approvalResponse(pending pendingApproval, choice string, answers map[string][]string, content map[string]any) (map[string]any, error) {
 	switch pending.Method {
 	case "item/commandExecution/requestApproval":
 		var decision any
@@ -507,6 +687,51 @@ func approvalResponse(pending pendingApproval, choice string) (map[string]any, e
 			return nil, errors.New("invalid approval decision")
 		}
 		return map[string]any{"decision": decision}, nil
+	case "item/fileChange/requestApproval":
+		decisions := map[string]string{
+			"accept":  "accept",
+			"always":  "acceptForSession",
+			"decline": "decline",
+			"cancel":  "cancel",
+		}
+		decision, ok := decisions[choice]
+		if !ok {
+			return nil, errors.New("invalid file change approval decision")
+		}
+		return map[string]any{"decision": decision}, nil
+	case "item/permissions/requestApproval":
+		if choice != "accept" && choice != "always" && choice != "decline" && choice != "cancel" {
+			return nil, errors.New("invalid permissions decision")
+		}
+		permissions := pending.Request.Permissions
+		if choice == "decline" || choice == "cancel" {
+			permissions = map[string]any{}
+		}
+		scope := "turn"
+		if choice == "always" {
+			scope = "session"
+		}
+		return map[string]any{"permissions": permissions, "scope": scope}, nil
+	case "item/tool/requestUserInput":
+		if len(answers) == 0 {
+			return nil, errors.New("answers are required")
+		}
+		formatted := make(map[string]any, len(answers))
+		for questionID, values := range answers {
+			formatted[questionID] = map[string]any{"answers": values}
+		}
+		return map[string]any{"answers": formatted}, nil
+	case "mcpServer/elicitation/request":
+		actions := map[string]string{"accept": "accept", "decline": "decline", "cancel": "cancel"}
+		action, ok := actions[choice]
+		if !ok {
+			return nil, errors.New("invalid MCP elicitation decision")
+		}
+		var responseContent any
+		if choice == "accept" && len(content) > 0 {
+			responseContent = content
+		}
+		return map[string]any{"action": action, "content": responseContent, "_meta": nil}, nil
 	case "execCommandApproval":
 		var decision any
 		switch choice {
@@ -533,7 +758,9 @@ func (c *Codex) runtimeSnapshot(threadID string) runtimeSnapshot {
 	approvals := make([]commandApproval, 0)
 	for _, pending := range c.approvals {
 		if pending.Request.ThreadID == threadID {
-			approvals = append(approvals, pending.Request)
+			approval := pending.Request
+			approval.Submitted = pending.SubmittedChoice != ""
+			approvals = append(approvals, approval)
 		}
 	}
 	c.stateMu.RUnlock()
@@ -619,6 +846,10 @@ func (c *Codex) reconcileRuntime(threadID string, status threadRuntimeStatus, tu
 
 func (c *Codex) handleNotification(method string, raw json.RawMessage) {
 	c.hub.broadcast(map[string]any{"type": "notification", "method": method, "params": json.RawMessage(raw)})
+	if method == "serverRequest/resolved" {
+		c.resolveApprovalFromNotification(raw)
+		return
+	}
 	var base struct {
 		ThreadID string `json:"threadId"`
 		TurnID   string `json:"turnId"`
@@ -916,10 +1147,12 @@ type server struct {
 }
 
 type browserCommand struct {
-	Type       string `json:"type"`
-	ThreadID   string `json:"threadId"`
-	ApprovalID string `json:"approvalId"`
-	Decision   string `json:"decision"`
+	Type       string              `json:"type"`
+	ThreadID   string              `json:"threadId"`
+	ApprovalID string              `json:"approvalId"`
+	Decision   string              `json:"decision"`
+	Answers    map[string][]string `json:"answers"`
+	Content    map[string]any      `json:"content"`
 }
 type chatRequest struct {
 	Message   string `json:"message"`
@@ -1060,7 +1293,7 @@ func (s *server) websocket(w http.ResponseWriter, r *http.Request) {
 			default:
 			}
 		case "approval/decide":
-			if err := s.codex.resolveApproval(command.ApprovalID, command.Decision); err != nil {
+			if err := s.codex.resolveApproval(command.ApprovalID, command.Decision, command.Answers, command.Content); err != nil {
 				s.codex.hub.broadcast(map[string]any{"type": "approval/error", "approvalId": command.ApprovalID, "message": err.Error()})
 			}
 		}
