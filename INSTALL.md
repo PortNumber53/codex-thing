@@ -157,6 +157,38 @@ curl --fail http://127.0.0.1:40001/api/health
 Then open `http://SERVER:40001` from another machine. If the hostname is not
 resolvable there, use the server's trusted LAN or VPN IP address.
 
+### Development server and custom hostnames
+
+For source development, install dependencies and start the Go and Vite processes
+in separate terminals:
+
+```bash
+npm ci
+npm run dev:server
+```
+
+```bash
+npm run dev
+```
+
+Open `http://SERVER:40000`. Vite proxies `/api` and WebSocket traffic to the Go
+bridge on port `40001`.
+
+Vite permits IP addresses and localhost names by default. To use a custom DNS or
+VPN hostname, copy the example configuration into the ignored local file and set
+a comma-separated allowlist:
+
+```bash
+cp .env.example .env.local
+```
+
+```dotenv
+VITE_ALLOWED_HOSTS=dev-host.example.com,dev-host.internal
+```
+
+Restart Vite after changing `.env.local`. Never commit private hostnames; the
+repository tracks only `.env.example` placeholders.
+
 ### Linux service details
 
 The installer creates:
