@@ -1262,18 +1262,35 @@ class SessionPickerSheet extends StatefulWidget {
     required this.selectedIndex,
     required this.onNew,
     required this.onRename,
+    required this.onReorder,
   });
 
   final List<MobileSession> sessions;
   final int selectedIndex;
   final VoidCallback onNew;
   final Future<void> Function(MobileSession session, String name) onRename;
+  final void Function(int oldIndex, int newIndex) onReorder;
 
   @override
   State<SessionPickerSheet> createState() => _SessionPickerSheetState();
 }
 
 class _SessionPickerSheetState extends State<SessionPickerSheet> {
+  late final String _selectedSessionId;
+
+  @override
+  void initState() {
+    super.initState();
+    _selectedSessionId = widget.sessions.isEmpty
+        ? ''
+        : widget
+              .sessions[widget.selectedIndex.clamp(
+                0,
+                widget.sessions.length - 1,
+              )]
+              .localId;
+  }
+
   Future<void> _rename(MobileSession session) async {
     final name = await showDialog<String>(
       context: context,
@@ -1320,75 +1337,103 @@ class _SessionPickerSheetState extends State<SessionPickerSheet> {
         ),
         const Divider(height: 1),
         Expanded(
-          child: ListView.separated(
+          child: ReorderableListView.builder(
             itemCount: widget.sessions.length,
-            separatorBuilder: (_, _) => const Divider(height: 1, indent: 72),
+            buildDefaultDragHandles: false,
+            onReorderItem: (oldIndex, newIndex) {
+              widget.onReorder(oldIndex, newIndex);
+              setState(() {});
+            },
             itemBuilder: (context, index) {
               final session = widget.sessions[index];
               final workspace = session.workspace.trim();
               final detail = session.working
                   ? 'Codex is working'
                   : session.preview.trim();
-              return ListTile(
-                selected: index == widget.selectedIndex,
-                isThreeLine: detail.isNotEmpty,
-                leading: CircleAvatar(
-                  backgroundColor: session.working
-                      ? const Color(0xFF294A38)
-                      : _raised,
-                  child: Icon(
-                    session.working ? Icons.bolt : Icons.chat_bubble_outline,
-                    color: session.working ? _accent : _muted,
-                    size: 19,
-                  ),
-                ),
-                title: Text(
-                  session.title,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-                subtitle: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      workspace.isEmpty ? 'Workspace not reported' : workspace,
+              final selected = session.localId == _selectedSessionId;
+              return Column(
+                key: ValueKey(session.localId),
+                children: [
+                  ListTile(
+                    selected: selected,
+                    isThreeLine: detail.isNotEmpty,
+                    leading: CircleAvatar(
+                      backgroundColor: session.working
+                          ? const Color(0xFF294A38)
+                          : _raised,
+                      child: Icon(
+                        session.working
+                            ? Icons.bolt
+                            : Icons.chat_bubble_outline,
+                        color: session.working ? _accent : _muted,
+                        size: 19,
+                      ),
+                    ),
+                    title: Text(
+                      session.title,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(color: _accent, fontSize: 12),
                     ),
-                    if (detail.isNotEmpty)
-                      Text(
-                        detail,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                  ],
-                ),
-                trailing: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    if (index == widget.selectedIndex)
-                      const Icon(Icons.check, color: _accent),
-                    PopupMenuButton<String>(
-                      enabled: session.threadId.isNotEmpty && !session.draft,
-                      tooltip: 'Session actions',
-                      onSelected: (action) {
-                        if (action == 'rename') _rename(session);
-                      },
-                      itemBuilder: (context) => const [
-                        PopupMenuItem(
-                          value: 'rename',
-                          child: ListTile(
-                            contentPadding: EdgeInsets.zero,
-                            leading: Icon(Icons.edit_outlined),
-                            title: Text('Rename session'),
+                    subtitle: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          workspace.isEmpty
+                              ? 'Workspace not reported'
+                              : workspace,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(color: _accent, fontSize: 12),
+                        ),
+                        if (detail.isNotEmpty)
+                          Text(
+                            detail,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                      ],
+                    ),
+                    trailing: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (selected) const Icon(Icons.check, color: _accent),
+                        PopupMenuButton<String>(
+                          enabled:
+                              session.threadId.isNotEmpty && !session.draft,
+                          tooltip: 'Session actions',
+                          onSelected: (action) {
+                            if (action == 'rename') _rename(session);
+                          },
+                          itemBuilder: (context) => const [
+                            PopupMenuItem(
+                              value: 'rename',
+                              child: ListTile(
+                                contentPadding: EdgeInsets.zero,
+                                leading: Icon(Icons.edit_outlined),
+                                title: Text('Rename session'),
+                              ),
+                            ),
+                          ],
+                        ),
+                        ReorderableDragStartListener(
+                          index: index,
+                          child: const Tooltip(
+                            message: 'Reorder session',
+                            child: Padding(
+                              padding: EdgeInsets.symmetric(
+                                horizontal: 8,
+                                vertical: 12,
+                              ),
+                              child: Icon(Icons.drag_handle, color: _muted),
+                            ),
                           ),
                         ),
                       ],
                     ),
-                  ],
-                ),
-                onTap: () => Navigator.pop(context, index),
+                    onTap: () => Navigator.pop(context, index),
+                  ),
+                  const Divider(height: 1, indent: 72),
+                ],
               );
             },
           ),

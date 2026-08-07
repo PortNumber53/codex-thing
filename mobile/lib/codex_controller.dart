@@ -64,6 +64,7 @@ class CodexController extends ChangeNotifier {
     defaultValue: 'http://10.0.2.2:40001',
   );
   static const String _serverPreference = 'codex_server_url';
+  static const String _sessionOrderPreference = 'codex_session_order';
 
   late CodexApi _api;
   final bool _preview;
@@ -76,6 +77,7 @@ class CodexController extends ChangeNotifier {
   bool _disposed = false;
   int _draftSequence = 0;
   String _serverUrl;
+  final List<String> _sessionOrder = [];
 
   BridgeConnection connection = BridgeConnection.connecting;
   AuthSnapshot auth = const AuthSnapshot();
@@ -93,6 +95,11 @@ class CodexController extends ChangeNotifier {
   Future<void> initialize() async {
     if (_preview) return;
     _preferences = await SharedPreferences.getInstance();
+    _sessionOrder
+      ..clear()
+      ..addAll(
+        _preferences?.getStringList(_sessionOrderPreference) ?? const [],
+      );
     final saved = _preferences?.getString(_serverPreference)?.trim();
     if (saved != null && saved.isNotEmpty && saved != _serverUrl) {
       _api.close();
@@ -156,6 +163,7 @@ class CodexController extends ChangeNotifier {
   Future<void> refreshThreads() async {
     if (connection != BridgeConnection.ready) return;
     try {
+      final selectedSessionId = selectedSession?.localId ?? '';
       final data = await _api.threads(all: true);
       if (defaultWorkspace.isEmpty) {
         defaultWorkspace = jsonString(data['workspace']);
@@ -190,7 +198,13 @@ class CodexController extends ChangeNotifier {
       if (sessions.isEmpty) {
         _addDraft(defaultWorkspace, notify: false);
       }
-      selectedIndex = selectedIndex.clamp(0, sessions.length - 1);
+      _applySessionOrder();
+      final restoredIndex = sessions.indexWhere(
+        (session) => session.localId == selectedSessionId,
+      );
+      selectedIndex = restoredIndex >= 0
+          ? restoredIndex
+          : selectedIndex.clamp(0, sessions.length - 1);
       _notify();
     } catch (error) {
       connectionError = 'Could not load sessions: $error';
@@ -245,6 +259,51 @@ class CodexController extends ChangeNotifier {
       _notify();
       rethrow;
     }
+  }
+
+  void reorderSessions(int oldIndex, int newIndex) {
+    if (oldIndex < 0 || oldIndex >= sessions.length) return;
+    if (newIndex < 0 || newIndex >= sessions.length || oldIndex == newIndex) {
+      return;
+    }
+
+    final selected = selectedSession;
+    final moved = sessions.removeAt(oldIndex);
+    sessions.insert(newIndex, moved);
+    if (selected != null) selectedIndex = sessions.indexOf(selected);
+    _notify();
+    unawaited(_persistSessionOrder());
+  }
+
+  void _applySessionOrder() {
+    if (_sessionOrder.isEmpty || sessions.length < 2) return;
+    final byThreadId = {
+      for (final session in sessions)
+        if (session.threadId.isNotEmpty) session.threadId: session,
+    };
+    final ordered = <MobileSession>[];
+    for (final threadId in _sessionOrder) {
+      final session = byThreadId.remove(threadId);
+      if (session != null) ordered.add(session);
+    }
+    ordered.addAll(sessions.where((session) => !ordered.contains(session)));
+    sessions
+      ..clear()
+      ..addAll(ordered);
+  }
+
+  Future<void> _persistSessionOrder() async {
+    _sessionOrder
+      ..clear()
+      ..addAll(
+        sessions
+            .where((session) => session.threadId.isNotEmpty)
+            .map((session) => session.threadId),
+      );
+    await _preferences?.setStringList(
+      _sessionOrderPreference,
+      List<String>.of(_sessionOrder),
+    );
   }
 
   MobileSession createDraft(String workspace, {bool select = true}) {
@@ -330,12 +389,14 @@ class CodexController extends ChangeNotifier {
           case 'ready':
             final threadId = jsonString(event.data['threadId']);
             if (threadId.isNotEmpty) {
+              final becamePersisted = session.threadId.isEmpty;
               session.threadId = threadId;
               session.draft = false;
               session.turnId = jsonString(event.data['turnId']);
               final workspace = jsonString(event.data['workspace']);
               if (workspace.isNotEmpty) session.workspace = workspace;
               subscribe(threadId);
+              if (becamePersisted) unawaited(_persistSessionOrder());
             }
           case 'delta':
             session.activity = '';

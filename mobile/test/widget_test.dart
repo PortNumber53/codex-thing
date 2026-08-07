@@ -114,6 +114,43 @@ void main() {
     expect(find.text('Server URL'), findsOneWidget);
   });
 
+  testWidgets('session picker reorders without changing the selected session', (
+    tester,
+  ) async {
+    final controller = CodexController(preview: true);
+    addTearDown(controller.dispose);
+
+    await tester.pumpWidget(CodexMobileApp(controller: controller));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Sessions'));
+    await tester.pumpAndSettle();
+
+    final picker = find.byType(SessionPickerSheet);
+    final reorderable = tester.widget<ReorderableListView>(
+      find.descendant(of: picker, matching: find.byType(ReorderableListView)),
+    );
+    reorderable.onReorderItem!(0, 1);
+    await tester.pumpAndSettle();
+
+    expect(controller.sessions.first.title, 'Review backend changes');
+    expect(controller.sessions.last.title, 'Build the mobile client');
+    expect(controller.selectedSession?.title, 'Build the mobile client');
+    expect(find.byTooltip('Reorder session'), findsNWidgets(2));
+    final selectedTile = tester
+        .widgetList<ListTile>(
+          find.descendant(of: picker, matching: find.byType(ListTile)),
+        )
+        .where((tile) => tile.selected);
+    expect(selectedTile, hasLength(1));
+
+    Navigator.of(tester.element(picker)).pop();
+    await tester.pumpAndSettle();
+
+    final pages = tester.widget<PageView>(find.byType(PageView)).controller!;
+    expect(pages.page, closeTo(1, .01));
+  });
+
   testWidgets('composer stays above the software keyboard', (tester) async {
     final controller = CodexController(preview: true);
     addTearDown(controller.dispose);

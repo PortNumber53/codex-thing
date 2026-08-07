@@ -127,6 +127,18 @@ class _CodexHomeState extends State<CodexHome> {
   void _controllerChanged() {
     if (!mounted) return;
     _syncComposer();
+    if (_pages.hasClients) {
+      final page = _pages.page;
+      if (page != null &&
+          (page - page.round()).abs() < .001 &&
+          page.round() != widget.controller.selectedIndex) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (_pages.hasClients) {
+            _pages.jumpToPage(widget.controller.selectedIndex);
+          }
+        });
+      }
+    }
   }
 
   void _syncComposer() {
@@ -183,6 +195,7 @@ class _CodexHomeState extends State<CodexHome> {
         sessions: widget.controller.sessions,
         selectedIndex: widget.controller.selectedIndex,
         onRename: widget.controller.renameSession,
+        onReorder: widget.controller.reorderSessions,
         onNew: () {
           Navigator.pop(context);
           unawaited(_newConversation());
@@ -330,6 +343,13 @@ class _CodexHomeState extends State<CodexHome> {
                             physics: const PageScrollPhysics(),
                             onPageChanged: _selectPage,
                             itemCount: controller.sessions.length,
+                            findChildIndexCallback: (key) {
+                              if (key is! ValueKey<String>) return null;
+                              final index = controller.sessions.indexWhere(
+                                (session) => session.localId == key.value,
+                              );
+                              return index < 0 ? null : index;
+                            },
                             itemBuilder: (context, index) => SessionPage(
                               key: ValueKey(controller.sessions[index].localId),
                               session: controller.sessions[index],
@@ -399,6 +419,7 @@ class _LandscapeConversationPaneState
   final FocusNode _composerFocus = FocusNode();
   late int _selectedIndex;
   late bool _hadSessions;
+  String _selectedSessionId = '';
   String _composerSessionId = '';
 
   MobileSession? get _session {
@@ -414,6 +435,7 @@ class _LandscapeConversationPaneState
     super.initState();
     _hadSessions = widget.controller.sessions.isNotEmpty;
     _selectedIndex = _normalizedIndex(widget.initialIndex);
+    _selectedSessionId = _session?.localId ?? '';
     _pages = PageController(initialPage: _selectedIndex);
     _syncComposer();
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -426,8 +448,17 @@ class _LandscapeConversationPaneState
   void didUpdateWidget(covariant _LandscapeConversationPane oldWidget) {
     super.didUpdateWidget(oldWidget);
     final hasSessions = widget.controller.sessions.isNotEmpty;
+    final rememberedIndex = _selectedSessionId.isEmpty
+        ? -1
+        : widget.controller.sessions.indexWhere(
+            (session) => session.localId == _selectedSessionId,
+          );
     final normalized = _normalizedIndex(
-      !_hadSessions && hasSessions ? widget.initialIndex : _selectedIndex,
+      !_hadSessions && hasSessions
+          ? widget.initialIndex
+          : rememberedIndex >= 0
+          ? rememberedIndex
+          : _selectedIndex,
     );
     _hadSessions = hasSessions;
     if (normalized != _selectedIndex) {
@@ -438,6 +469,7 @@ class _LandscapeConversationPaneState
     }
     _syncComposer();
     final session = _session;
+    _selectedSessionId = session?.localId ?? '';
     if (session != null && !session.loaded && !session.loading) {
       unawaited(widget.controller.openSession(session));
     }
@@ -473,6 +505,7 @@ class _LandscapeConversationPaneState
     _syncComposer();
     final session = _session;
     if (session == null) return;
+    _selectedSessionId = session.localId;
     if (widget.primary) {
       await widget.controller.selectSession(_selectedIndex);
     } else {
@@ -497,6 +530,7 @@ class _LandscapeConversationPaneState
       select: widget.primary,
     );
     _selectedIndex = widget.controller.sessions.indexOf(draft);
+    _selectedSessionId = draft.localId;
     _composerSessionId = draft.localId;
     _composer.clear();
     setState(() {});
@@ -522,6 +556,7 @@ class _LandscapeConversationPaneState
         sessions: widget.controller.sessions,
         selectedIndex: _selectedIndex,
         onRename: widget.controller.renameSession,
+        onReorder: widget.controller.reorderSessions,
         onNew: () {
           Navigator.pop(context);
           unawaited(_newConversation());
@@ -600,6 +635,18 @@ class _LandscapeConversationPaneState
                       physics: const PageScrollPhysics(),
                       onPageChanged: _selectPage,
                       itemCount: controller.sessions.length,
+                      findChildIndexCallback: (key) {
+                        if (key is! ValueKey<String>) return null;
+                        final prefix = widget.primary
+                            ? 'primary-'
+                            : 'secondary-';
+                        if (!key.value.startsWith(prefix)) return null;
+                        final localId = key.value.substring(prefix.length);
+                        final index = controller.sessions.indexWhere(
+                          (session) => session.localId == localId,
+                        );
+                        return index < 0 ? null : index;
+                      },
                       itemBuilder: (context, index) => SessionPage(
                         key: ValueKey(
                           '${widget.primary ? 'primary' : 'secondary'}-${controller.sessions[index].localId}',
