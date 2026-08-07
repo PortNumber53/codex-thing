@@ -1144,17 +1144,45 @@ class ConnectionStateView extends StatelessWidget {
   );
 }
 
-class SessionPickerSheet extends StatelessWidget {
+class SessionPickerSheet extends StatefulWidget {
   const SessionPickerSheet({
     super.key,
     required this.sessions,
     required this.selectedIndex,
     required this.onNew,
+    required this.onRename,
   });
 
   final List<MobileSession> sessions;
   final int selectedIndex;
   final VoidCallback onNew;
+  final Future<void> Function(MobileSession session, String name) onRename;
+
+  @override
+  State<SessionPickerSheet> createState() => _SessionPickerSheetState();
+}
+
+class _SessionPickerSheetState extends State<SessionPickerSheet> {
+  Future<void> _rename(MobileSession session) async {
+    final name = await showDialog<String>(
+      context: context,
+      builder: (context) => RenameSessionDialog(initialName: session.title),
+    );
+    if (!mounted || name == null) return;
+    try {
+      await widget.onRename(session, name);
+      if (!mounted) return;
+      setState(() {});
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Session renamed.')));
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not rename session: $error')),
+      );
+    }
+  }
 
   @override
   Widget build(BuildContext context) => SizedBox(
@@ -1172,7 +1200,7 @@ class SessionPickerSheet extends StatelessWidget {
                 ),
               ),
               IconButton.filledTonal(
-                onPressed: onNew,
+                onPressed: widget.onNew,
                 icon: const Icon(Icons.add),
                 tooltip: 'New conversation',
               ),
@@ -1182,12 +1210,17 @@ class SessionPickerSheet extends StatelessWidget {
         const Divider(height: 1),
         Expanded(
           child: ListView.separated(
-            itemCount: sessions.length,
+            itemCount: widget.sessions.length,
             separatorBuilder: (_, _) => const Divider(height: 1, indent: 72),
             itemBuilder: (context, index) {
-              final session = sessions[index];
+              final session = widget.sessions[index];
+              final workspace = session.workspace.trim();
+              final detail = session.working
+                  ? 'Codex is working'
+                  : session.preview.trim();
               return ListTile(
-                selected: index == selectedIndex,
+                selected: index == widget.selectedIndex,
+                isThreeLine: detail.isNotEmpty,
                 leading: CircleAvatar(
                   backgroundColor: session.working
                       ? const Color(0xFF294A38)
@@ -1203,18 +1236,47 @@ class SessionPickerSheet extends StatelessWidget {
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                 ),
-                subtitle: Text(
-                  session.working
-                      ? 'Codex is working'
-                      : session.preview.isNotEmpty
-                      ? session.preview
-                      : session.workspace,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
+                subtitle: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      workspace.isEmpty ? 'Workspace not reported' : workspace,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(color: _accent, fontSize: 12),
+                    ),
+                    if (detail.isNotEmpty)
+                      Text(
+                        detail,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                  ],
                 ),
-                trailing: index == selectedIndex
-                    ? const Icon(Icons.check, color: _accent)
-                    : null,
+                trailing: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (index == widget.selectedIndex)
+                      const Icon(Icons.check, color: _accent),
+                    PopupMenuButton<String>(
+                      enabled: session.threadId.isNotEmpty && !session.draft,
+                      tooltip: 'Session actions',
+                      onSelected: (action) {
+                        if (action == 'rename') _rename(session);
+                      },
+                      itemBuilder: (context) => const [
+                        PopupMenuItem(
+                          value: 'rename',
+                          child: ListTile(
+                            contentPadding: EdgeInsets.zero,
+                            leading: Icon(Icons.edit_outlined),
+                            title: Text('Rename session'),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
                 onTap: () => Navigator.pop(context, index),
               );
             },
@@ -1222,6 +1284,86 @@ class SessionPickerSheet extends StatelessWidget {
         ),
       ],
     ),
+  );
+}
+
+class RenameSessionDialog extends StatefulWidget {
+  const RenameSessionDialog({super.key, required this.initialName});
+
+  final String initialName;
+
+  @override
+  State<RenameSessionDialog> createState() => _RenameSessionDialogState();
+}
+
+class _RenameSessionDialogState extends State<RenameSessionDialog> {
+  late final TextEditingController name;
+  String error = '';
+
+  @override
+  void initState() {
+    super.initState();
+    name = TextEditingController(text: widget.initialName);
+    name.selection = TextSelection(
+      baseOffset: 0,
+      extentOffset: name.text.length,
+    );
+  }
+
+  @override
+  void dispose() {
+    name.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    final value = name.text.trim();
+    if (value.isEmpty) {
+      setState(() => error = 'Enter a session name.');
+      return;
+    }
+    if (value.runes.length > 200) {
+      setState(() => error = 'Use 200 characters or fewer.');
+      return;
+    }
+    Navigator.pop(context, value);
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: const Text('Rename session'),
+    content: Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          'This name will appear in every connected Codex client.',
+          style: TextStyle(color: _muted, height: 1.4),
+        ),
+        const SizedBox(height: 16),
+        TextField(
+          controller: name,
+          autofocus: true,
+          maxLength: 200,
+          textInputAction: TextInputAction.done,
+          onChanged: (_) {
+            if (error.isNotEmpty) setState(() => error = '');
+          },
+          onSubmitted: (_) => _submit(),
+          decoration: InputDecoration(
+            labelText: 'Session name',
+            errorText: error.isEmpty ? null : error,
+          ),
+        ),
+      ],
+    ),
+    actions: [
+      TextButton(
+        onPressed: () => Navigator.pop(context),
+        child: const Text('Cancel'),
+      ),
+      FilledButton(onPressed: _submit, child: const Text('Rename')),
+    ],
   );
 }
 

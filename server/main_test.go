@@ -105,6 +105,67 @@ func TestThreadListParamsCanSpanAllWorkspaces(t *testing.T) {
 	}
 }
 
+func TestRenameThreadUsesAppServerProtocol(t *testing.T) {
+	received := make(chan envelope, 1)
+	httpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.CloseNow()
+		_, payload, err := conn.Read(r.Context())
+		if err != nil {
+			return
+		}
+		var request envelope
+		if json.Unmarshal(payload, &request) != nil {
+			return
+		}
+		received <- request
+		response, _ := json.Marshal(map[string]any{"id": json.RawMessage(request.ID), "result": map[string]any{}})
+		_ = conn.Write(r.Context(), websocket.MessageText, response)
+	}))
+	defer httpServer.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(httpServer.URL, "http"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+	codex := newCodex(conn, "ws://codex.test")
+	codex.ready.Store(true)
+	go codex.readLoop()
+	s := &server{codex: codex}
+
+	req := httptest.NewRequest(http.MethodPatch, "/api/threads/thread-1/name", strings.NewReader(`{"name":"  Release planning  "}`))
+	recorder := httptest.NewRecorder()
+	s.threads(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("rename failed: %d %s", recorder.Code, recorder.Body.String())
+	}
+
+	request := <-received
+	if request.Method != "thread/name/set" {
+		t.Fatalf("unexpected app-server method: %s", request.Method)
+	}
+	var params map[string]string
+	if err := json.Unmarshal(request.Params, &params); err != nil {
+		t.Fatal(err)
+	}
+	if params["threadId"] != "thread-1" || params["name"] != "Release planning" {
+		t.Fatalf("unexpected rename params: %#v", params)
+	}
+	var response map[string]string
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response["title"] != "Release planning" {
+		t.Fatalf("unexpected response: %#v", response)
+	}
+}
+
 func TestRefreshAuthStartsDeviceLoginWhenRequired(t *testing.T) {
 	httpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := websocket.Accept(w, r, nil)

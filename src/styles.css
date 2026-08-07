@@ -38,11 +38,22 @@ aside { background: rgba(20, 20, 19, .95); border-right: 1px solid var(--line); 
 .workspace div { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
 .workspace strong { color: #dedcd5; font-size: 13px; }
 .workspace span { color: #706e69; font-family: 'DM Mono', monospace; font-size: 9px; text-overflow: ellipsis; overflow: hidden; }
-.recent-label { padding-top: 22px; }
+.recent-label { padding-top: 22px; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.recent-label small { min-width: 20px; padding: 2px 5px; border-radius: 10px; color: #8b8881; background: #242321; font: 8px 'DM Mono'; text-align: center; letter-spacing: 0; }
 .thread-list { display: flex; flex-direction: column; gap: 3px; min-height: 0; overflow-y: auto; }
-.thread-list button { width: 100%; border: 0; border-radius: 7px; background: transparent; color: #98958e; display: flex; align-items: center; gap: 8px; padding: 9px 10px; text-align: left; cursor: pointer; }
-.thread-list button:hover { background: #201f1d; color: #d2d0c9; }.thread-list button.active { color: #e4b095; background: #291d17; }
-.thread-list button span { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }.thread-list button small { color: #5f5d58; font: 8px 'DM Mono'; }
+.thread-row { position: relative; min-width: 0; display: flex; align-items: stretch; border-radius: 7px; color: #98958e; }
+.thread-row:hover { background: #201f1d; color: #d2d0c9; }.thread-row.active { color: #e4b095; background: #291d17; }
+.thread-open { min-width: 0; flex: 1; border: 0; border-radius: 7px; background: transparent; color: inherit; display: flex; align-items: center; gap: 8px; padding: 9px 4px 9px 10px; text-align: left; cursor: pointer; }
+.thread-open:disabled { cursor: default; }
+.thread-list .thread-copy { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 2px; }
+.thread-list .thread-copy strong, .thread-list .thread-copy em { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.thread-list .thread-copy strong { font-size: 11px; font-weight: 500; }
+.thread-list .thread-copy em { color: #66635e; font: 7px 'DM Mono'; font-style: normal; }
+.thread-open > small { flex: none; color: #5f5d58; font: 8px 'DM Mono'; }
+.thread-menu-toggle { width: 28px; flex: none; border: 0; border-radius: 6px; color: #66635e; background: transparent; cursor: pointer; font-weight: 700; letter-spacing: 1px; opacity: 0; }
+.thread-row:hover .thread-menu-toggle, .thread-menu-toggle[aria-expanded='true'] { opacity: 1; }.thread-menu-toggle:hover { color: #d8d4cc; background: #302e2a; }
+.thread-menu { position: absolute; z-index: 12; top: calc(100% - 2px); right: 3px; width: 142px; padding: 4px; border: 1px solid #3b3935; border-radius: 8px; background: #1b1a18; box-shadow: 0 12px 30px rgba(0,0,0,.42); }
+.thread-menu button { width: 100%; border: 0; border-radius: 5px; padding: 8px 9px; color: #c8c4bc; background: transparent; text-align: left; cursor: pointer; font-size: 10px; }.thread-menu button:hover { color: #f0c2aa; background: #30221b; }
 .thread-list p { color: #5f5d58; font-size: 10px; padding: 0 10px; margin: 5px 0; }
 .aside-spacer { flex: 1; }
 .connection { display: flex; align-items: center; gap: 11px; padding: 12px 9px 2px; border-top: 1px solid #252421; white-space: nowrap; }
@@ -50,6 +61,14 @@ aside { background: rgba(20, 20, 19, .95); border-right: 1px solid var(--line); 
 .connection strong { font-size: 11px; font-weight: 600; }.connection small { font-size: 9px; color: #706e68; }
 .status-dot { width: 7px; height: 7px; border-radius: 50%; background: #777; flex: none; }
 .status-dot.ready { background: var(--green); box-shadow: 0 0 0 4px rgba(110,203,146,.09); }.status-dot.offline { background: #d75c51; }.status-dot.auth { background: var(--orange); box-shadow: 0 0 0 4px rgba(232,111,60,.1); }.status-dot.connecting { animation: pulse 1s infinite; }
+
+.dialog-backdrop { position: fixed; z-index: 30; inset: 0; display: grid; place-items: center; padding: 20px; background: rgba(0,0,0,.64); backdrop-filter: blur(5px); }
+.rename-dialog { width: min(430px, 100%); padding: 24px; border: 1px solid #403b35; border-radius: 14px; background: #1a1917; box-shadow: 0 24px 80px rgba(0,0,0,.52); }
+.rename-dialog h2 { margin: 0; font-size: 20px; }.rename-dialog p { margin: 8px 0 20px; color: #89867f; font-size: 11px; line-height: 1.5; }
+.rename-dialog label { display: block; margin-bottom: 7px; color: #aaa69e; font-size: 10px; font-weight: 600; }
+.rename-dialog input { width: 100%; height: 42px; border: 1px solid #44403b; border-radius: 8px; outline: 0; padding: 0 11px; color: #eeeae2; background: #111110; font: 12px Manrope; }.rename-dialog input:focus { border-color: #a95d39; box-shadow: 0 0 0 3px rgba(232,111,60,.1); }
+.rename-error { display: block; margin-top: 8px; color: #df8073; font-size: 10px; }
+.dialog-actions { margin-top: 20px; display: flex; justify-content: flex-end; gap: 8px; }.dialog-actions button { min-width: 82px; height: 36px; border: 1px solid #3c3935; border-radius: 8px; color: #b8b4ac; background: #242321; cursor: pointer; font-size: 11px; }.dialog-actions button[type='submit'] { border-color: #d6693a; color: #1a110d; background: var(--orange); font-weight: 700; }.dialog-actions button:disabled { cursor: default; opacity: .55; }
 
 main { min-width: 0; min-height: 0; display: grid; grid-template-rows: calc(64px + env(safe-area-inset-top, 0px)) minmax(0, 1fr) auto; height: 100%; overflow: hidden; }
 header { border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 13px; padding: env(safe-area-inset-top, 0px) calc(22px + env(safe-area-inset-right, 0px)) 0 calc(22px + env(safe-area-inset-left, 0px)); background: rgba(15,15,14,.72); backdrop-filter: blur(12px); }
@@ -117,5 +136,7 @@ textarea { display: block; resize: none; border: 0; outline: 0; width: 100%; min
 @supports (height: 100dvh) {
   html, body, #root { height: 100dvh; }
 }
+
+@media (hover: none), (max-width: 780px) { .thread-menu-toggle { opacity: 1; } }
 
 @media (max-width: 780px) { .app { grid-template-columns: 0 minmax(0, 1fr); }.app:not(.sidebar-closed) { grid-template-columns: min(82vw,272px) minmax(0, 1fr); } aside { position: relative; z-index: 4; }.prompt-grid { grid-template-columns: 1fr; }.prompt-grid button { min-height: 75px; }.empty-state { justify-content: flex-start; padding-top: 80px; }.auth-state { align-items: start; padding: 44px 14px 50px; }.auth-card { padding: 26px 18px; }.auth-code { align-items: stretch; flex-direction: column; padding: 14px; }.auth-code button { justify-content: center; } footer { padding-right: calc(12px + env(safe-area-inset-right, 0px)); padding-left: calc(12px + env(safe-area-inset-left, 0px)); }.message-list { width: calc(100% - 28px); } }

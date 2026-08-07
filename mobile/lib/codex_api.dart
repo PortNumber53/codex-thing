@@ -69,6 +69,23 @@ class CodexApi {
   Future<JsonMap> thread(String threadId) =>
       _getJson(endpoint('/api/threads/${Uri.encodeComponent(threadId)}'));
 
+  Future<JsonMap> renameThread(String threadId, String name) async {
+    final response = await _client.patch(
+      endpoint('/api/threads/${Uri.encodeComponent(threadId)}/name'),
+      headers: const {'Content-Type': 'application/json'},
+      body: jsonEncode({'name': name}),
+    );
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw ApiException(
+        response.body.trim().isEmpty
+            ? 'HTTP ${response.statusCode}'
+            : response.body.trim(),
+        response.statusCode,
+      );
+    }
+    return _decodeMap(response.body);
+  }
+
   Future<AuthSnapshot> auth({bool start = false}) async {
     final uri = endpoint('/api/auth');
     final response = start ? await _client.post(uri) : await _client.get(uri);

@@ -303,6 +303,11 @@ export default function App() {
   const [sidebar, setSidebar] = useState(true)
   const [threads, setThreads] = useState([])
   const [loadingThread, setLoadingThread] = useState('')
+  const [threadMenu, setThreadMenu] = useState('')
+  const [renamingThread, setRenamingThread] = useState(null)
+  const [renameInput, setRenameInput] = useState('')
+  const [renameError, setRenameError] = useState('')
+  const [renameSaving, setRenameSaving] = useState(false)
   const [approvals, setApprovals] = useState([])
   const [approvalError, setApprovalError] = useState('')
   const [decidingApproval, setDecidingApproval] = useState('')
@@ -341,6 +346,12 @@ export default function App() {
   useEffect(() => { threadIdRef.current = threadId }, [threadId])
   useEffect(() => { workingRef.current = working }, [working])
   useEffect(() => { workspaceRef.current = workspace }, [workspace])
+  useEffect(() => {
+    if (!threadMenu) return
+    const close = () => setThreadMenu('')
+    document.addEventListener('click', close)
+    return () => document.removeEventListener('click', close)
+  }, [threadMenu])
   useEffect(() => {
     if (!differentWorkspace || !workspaceInput.trim()) {
       setWorkspaceSuggestions([])
@@ -426,10 +437,9 @@ export default function App() {
     }
   }, [threadId])
 
-  const refreshThreads = async (cwd = workspaceRef.current) => {
+  const refreshThreads = async () => {
     try {
-      const query = cwd ? `?cwd=${encodeURIComponent(cwd)}` : ''
-      const response = await fetch(`/api/threads${query}`)
+      const response = await fetch('/api/threads?scope=all')
       if (!response.ok) return
       const data = await response.json()
       setThreads(data.threads || [])
@@ -534,7 +544,7 @@ export default function App() {
         setWorkspace(data.workspace)
         setWorkspaceInput(data.workspace)
         setDifferentWorkspace(Boolean(defaultWorkspaceRef.current && data.workspace !== defaultWorkspaceRef.current))
-        refreshThreads(data.workspace)
+        refreshThreads()
       }
       applyRuntimeSnapshot(data.runtime || { threadId: data.threadId || id, working: false, approvals: [] })
       setThreadInLocation(selectedThreadId)
@@ -542,6 +552,49 @@ export default function App() {
       if (!silent) setMessages([{ role: 'assistant', text: `I couldn't load that session: ${error.message}`, error: true }])
     } finally {
       if (!silent) setLoadingThread('')
+    }
+  }
+
+  const beginRename = thread => {
+    setThreadMenu('')
+    setRenamingThread(thread)
+    setRenameInput(thread.title || '')
+    setRenameError('')
+  }
+
+  const closeRename = () => {
+    if (renameSaving) return
+    setRenamingThread(null)
+    setRenameInput('')
+    setRenameError('')
+  }
+
+  const renameThread = async event => {
+    event.preventDefault()
+    if (!renamingThread || renameSaving) return
+    const name = renameInput.trim()
+    if (!name) {
+      setRenameError('Enter a session name.')
+      return
+    }
+    setRenameSaving(true)
+    setRenameError('')
+    try {
+      const response = await fetch(`/api/threads/${encodeURIComponent(renamingThread.id)}/name`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      })
+      if (!response.ok) throw new Error((await response.text()).trim() || `HTTP ${response.status}`)
+      const data = await response.json()
+      setThreads(current => current.map(thread => thread.id === renamingThread.id ? { ...thread, title: data.title || name } : thread))
+      setRenamingThread(null)
+      setRenameInput('')
+      refreshThreads()
+    } catch (error) {
+      setRenameError(error.message)
+    } finally {
+      setRenameSaving(false)
     }
   }
 
@@ -556,7 +609,7 @@ export default function App() {
     if (targetWorkspace) {
       workspaceRef.current = targetWorkspace
       setWorkspace(targetWorkspace)
-      refreshThreads(targetWorkspace)
+      refreshThreads()
     }
     setMessages([])
     setThreadId('')
@@ -737,12 +790,18 @@ export default function App() {
       </div>
       <div className="nav-label">WORKSPACE</div>
       <button className="workspace" onClick={() => openThread(threadId)} disabled={working || !threadId}><Icon name="code" /><div><strong>{workspaceName(workspace || defaultWorkspace)}</strong><span>{workspace || defaultWorkspace || 'Loading workspace…'}</span></div></button>
-      <div className="nav-label recent-label">RECENT SESSIONS</div>
+      <div className="nav-label recent-label"><span>RECENT SESSIONS</span><small>{threads.length}</small></div>
       <div className="thread-list">
-        {threads.map(thread => <button key={thread.id} className={thread.id === threadId ? 'active' : ''} onClick={() => openThread(thread.id)} disabled={working} title={thread.preview || thread.title}>
-          <span>{loadingThread === thread.id ? 'Loading…' : thread.title}</span>
-          <small>{new Date(thread.updatedAt * 1000).toLocaleDateString([], { month: 'short', day: 'numeric' })}</small>
-        </button>)}
+        {threads.map(thread => <div key={thread.id} className={`thread-row ${thread.id === threadId ? 'active' : ''}`}>
+          <button className="thread-open" onClick={() => openThread(thread.id)} disabled={working} title={`${thread.title}\n${thread.cwd || 'Workspace not reported'}`}>
+            <span className="thread-copy"><strong>{loadingThread === thread.id ? 'Loading…' : thread.title}</strong><em>{thread.cwd || 'Workspace not reported'}</em></span>
+            <small>{new Date(thread.updatedAt * 1000).toLocaleDateString([], { month: 'short', day: 'numeric' })}</small>
+          </button>
+          <button className="thread-menu-toggle" type="button" aria-label={`Session menu for ${thread.title}`} aria-haspopup="menu" aria-expanded={threadMenu === thread.id} onClick={event => { event.stopPropagation(); setThreadMenu(current => current === thread.id ? '' : thread.id) }}>•••</button>
+          {threadMenu === thread.id && <div className="thread-menu" role="menu" onClick={event => event.stopPropagation()}>
+            <button type="button" role="menuitem" onClick={() => beginRename(thread)}>Rename session</button>
+          </div>}
+        </div>)}
         {!threads.length && <p>No saved sessions yet</p>}
       </div>
       <div className="aside-spacer" />
@@ -776,5 +835,15 @@ export default function App() {
         <p className="disclaimer">Codex can make mistakes. Review commands and file changes.</p>
       </footer>
     </main>
+    {renamingThread && <div className="dialog-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) closeRename() }}>
+      <form className="rename-dialog" role="dialog" aria-modal="true" aria-labelledby="rename-session-title" onSubmit={renameThread} onKeyDown={event => { if (event.key === 'Escape') closeRename() }}>
+        <h2 id="rename-session-title">Rename session</h2>
+        <p>Choose a name that will appear in every connected Codex client.</p>
+        <label htmlFor="session-name">Session name</label>
+        <input id="session-name" autoFocus maxLength={200} value={renameInput} onChange={event => { setRenameInput(event.target.value); setRenameError('') }} disabled={renameSaving} />
+        {renameError && <span className="rename-error">{renameError}</span>}
+        <div className="dialog-actions"><button type="button" onClick={closeRename} disabled={renameSaving}>Cancel</button><button type="submit" disabled={renameSaving || !renameInput.trim()}>{renameSaving ? 'Saving…' : 'Rename'}</button></div>
+      </form>
+    </div>}
   </div>
 }

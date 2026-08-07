@@ -1585,6 +1585,10 @@ type interruptRequest struct {
 	TurnID   string `json:"turnId"`
 }
 
+type threadNameRequest struct {
+	Name string `json:"name"`
+}
+
 type threadSummary struct {
 	ID        string `json:"id"`
 	Title     string `json:"title"`
@@ -1754,6 +1758,12 @@ func (s *server) websocket(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) threads(w http.ResponseWriter, r *http.Request) {
+	threadPath := strings.TrimPrefix(r.URL.Path, "/api/threads/")
+	if r.URL.Path != "/api/threads" && r.URL.Path != "/api/threads/" && strings.HasSuffix(threadPath, "/name") {
+		threadID := strings.TrimSuffix(threadPath, "/name")
+		s.threadName(w, r, threadID)
+		return
+	}
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -1763,7 +1773,7 @@ func (s *server) threads(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	threadID := strings.TrimPrefix(r.URL.Path, "/api/threads/")
+	threadID := threadPath
 	if r.URL.Path != "/api/threads" && r.URL.Path != "/api/threads/" && threadID != "" {
 		s.threadHistory(w, r, threadID)
 		return
@@ -1837,6 +1847,45 @@ func (s *server) threads(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"threads": threads, "workspace": workspace})
+}
+
+func (s *server) threadName(w http.ResponseWriter, r *http.Request, threadID string) {
+	if r.Method != http.MethodPatch {
+		w.Header().Set("Allow", "PATCH")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if len(threadID) == 0 || len(threadID) > 128 || strings.ContainsAny(threadID, `/\\`) {
+		http.Error(w, "invalid thread id", http.StatusBadRequest)
+		return
+	}
+	var req threadNameRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	req.Name = strings.TrimSpace(req.Name)
+	if req.Name == "" {
+		http.Error(w, "name is required", http.StatusBadRequest)
+		return
+	}
+	if len([]rune(req.Name)) > 200 {
+		http.Error(w, "name must be 200 characters or fewer", http.StatusBadRequest)
+		return
+	}
+	if !s.codex.ready.Load() {
+		http.Error(w, "codex app-server is unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	if err := s.codex.call(ctx, "thread/name/set", map[string]string{"threadId": threadID, "name": req.Name}, nil); err != nil {
+		http.Error(w, "rename thread: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"threadId": threadID, "title": req.Name})
 }
 
 func threadListParams(workspace string, allWorkspaces bool) map[string]any {

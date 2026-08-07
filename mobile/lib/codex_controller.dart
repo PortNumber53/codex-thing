@@ -212,6 +212,37 @@ class CodexController extends ChangeNotifier {
     }
   }
 
+  Future<void> renameSession(MobileSession session, String rawName) async {
+    final name = rawName.trim();
+    if (session.threadId.isEmpty || session.draft) {
+      throw const ApiException('Start the conversation before renaming it.');
+    }
+    if (name.isEmpty) {
+      throw const ApiException('Enter a session name.');
+    }
+    if (name.runes.length > 200) {
+      throw const ApiException(
+        'Session names can contain up to 200 characters.',
+      );
+    }
+
+    final previousTitle = session.title;
+    session.title = name;
+    _notify();
+    if (_preview) return;
+
+    try {
+      final data = await _api.renameThread(session.threadId, name);
+      final title = jsonString(data['title']).trim();
+      if (title.isNotEmpty) session.title = title;
+      _notify();
+    } catch (error) {
+      session.title = previousTitle;
+      _notify();
+      rethrow;
+    }
+  }
+
   MobileSession createDraft([String workspace = '']) {
     final draft = _addDraft(
       workspace.trim().isEmpty ? defaultWorkspace : workspace.trim(),

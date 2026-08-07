@@ -21,6 +21,67 @@ void main() {
     expect(find.text('Settings'), findsOneWidget);
     expect(find.text('Swipe sessions  ·  1 of 2'), findsOneWidget);
 
+    await tester.tap(find.text('Sessions'));
+    await tester.pumpAndSettle();
+
+    final sessionPicker = find.byType(SessionPickerSheet);
+    expect(
+      find.descendant(
+        of: sessionPicker,
+        matching: find.text('/workspace/androidex'),
+      ),
+      findsNWidgets(2),
+    );
+    expect(
+      find.descendant(
+        of: sessionPicker,
+        matching: find.text('Build the mobile client'),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: sessionPicker,
+        matching: find.text('Review backend changes'),
+      ),
+      findsOneWidget,
+    );
+
+    final sessionActions = find.descendant(
+      of: sessionPicker,
+      matching: find.byTooltip('Session actions'),
+    );
+    expect(sessionActions, findsNWidgets(2));
+    await tester.tap(sessionActions.first);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Rename session'));
+    await tester.pumpAndSettle();
+
+    final renameDialog = find.byType(RenameSessionDialog);
+    expect(renameDialog, findsOneWidget);
+    await tester.enterText(
+      find.descendant(of: renameDialog, matching: find.byType(TextField)),
+      'Mobile session name',
+    );
+    await tester.tap(
+      find.descendant(
+        of: renameDialog,
+        matching: find.widgetWithText(FilledButton, 'Rename'),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      find.descendant(
+        of: sessionPicker,
+        matching: find.text('Mobile session name'),
+      ),
+      findsOneWidget,
+    );
+
+    Navigator.of(tester.element(sessionPicker)).pop();
+    await tester.pumpAndSettle();
+
     await tester.fling(find.byType(PageView), const Offset(-500, 0), 1000);
     await tester.pumpAndSettle();
 

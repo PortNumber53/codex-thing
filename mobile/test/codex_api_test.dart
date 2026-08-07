@@ -38,6 +38,35 @@ void main() {
     expect(events[0].data['threadId'], 'thread-1');
     expect(events[1].data['text'], 'Hello');
   });
+
+  test('requests recent sessions across every workspace', () async {
+    final client = _RequestCaptureClient('{"threads":[]}');
+    final api = CodexApi('http://codex.test:40001', client: client);
+    addTearDown(api.close);
+
+    await api.threads(all: true);
+
+    expect(client.request?.method, 'GET');
+    expect(client.request?.url.path, '/api/threads');
+    expect(client.request?.url.queryParameters, {'scope': 'all'});
+  });
+
+  test('renames a persisted session through the Go bridge', () async {
+    final client = _RequestCaptureClient(
+      '{"threadId":"thread-1","title":"Release planning"}',
+    );
+    final api = CodexApi('http://codex.test:40001', client: client);
+    addTearDown(api.close);
+
+    final result = await api.renameThread('thread-1', 'Release planning');
+
+    expect(client.request?.method, 'PATCH');
+    expect(client.request?.url.path, '/api/threads/thread-1/name');
+    expect(jsonDecode((client.request as http.Request).body), {
+      'name': 'Release planning',
+    });
+    expect(result['title'], 'Release planning');
+  });
 }
 
 class _FakeClient extends http.BaseClient {
@@ -53,6 +82,23 @@ class _FakeClient extends http.BaseClient {
       Stream.value(utf8.encode(body)),
       200,
       headers: const {'content-type': 'text/event-stream'},
+    );
+  }
+}
+
+class _RequestCaptureClient extends http.BaseClient {
+  _RequestCaptureClient(this.body);
+
+  final String body;
+  http.BaseRequest? request;
+
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) async {
+    this.request = request;
+    return http.StreamedResponse(
+      Stream.value(utf8.encode(body)),
+      200,
+      headers: const {'content-type': 'application/json'},
     );
   }
 }

@@ -181,6 +181,7 @@ class _CodexHomeState extends State<CodexHome> {
       builder: (context) => SessionPickerSheet(
         sessions: widget.controller.sessions,
         selectedIndex: widget.controller.selectedIndex,
+        onRename: widget.controller.renameSession,
         onNew: () {
           Navigator.pop(context);
           unawaited(_newConversation());
