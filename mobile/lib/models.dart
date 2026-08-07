@@ -380,6 +380,27 @@ class MobileSession {
       activity = 'Working';
     }
   }
+
+  void applyThreadStatus(String status, List<String> activeFlags) {
+    if (status == 'active') {
+      working = true;
+      active = true;
+      if (activeFlags.contains('waitingOnApproval')) {
+        activity = 'Waiting for approval';
+      } else if (activity.isEmpty) {
+        activity = 'Working';
+      }
+      return;
+    }
+    if (status == 'idle' || status == 'systemError') {
+      working = false;
+      active = false;
+      turnId = '';
+      activity = '';
+      approvals = [];
+      decidingApprovals.clear();
+    }
+  }
 }
 
 String prettyJson(Object? value) =>

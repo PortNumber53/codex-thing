@@ -1168,11 +1168,22 @@ func (c *Codex) clearActiveTurn(threadID, turnID string) {
 	}
 	c.stateMu.Lock()
 	current, exists := c.active[threadID]
-	if exists && (turnID == "" || current.TurnID == "" || current.TurnID == turnID) {
+	cleared := exists && (turnID == "" || current.TurnID == "" || current.TurnID == turnID)
+	resolvedApprovals := make([]string, 0)
+	if cleared {
 		delete(c.active, threadID)
+		for id, pending := range c.approvals {
+			if pending.Request.ThreadID == threadID {
+				resolvedApprovals = append(resolvedApprovals, id)
+				delete(c.approvals, id)
+			}
+		}
 	}
 	c.stateMu.Unlock()
-	if exists {
+	for _, approvalID := range resolvedApprovals {
+		c.hub.broadcast(map[string]any{"type": "approval/resolved", "threadId": threadID, "approvalId": approvalID})
+	}
+	if cleared {
 		c.broadcastRuntime(threadID)
 	}
 }
@@ -1201,6 +1212,18 @@ func (c *Codex) reconcileRuntime(threadID string, status threadRuntimeStatus, tu
 		c.clearActiveTurn(threadID, "")
 	}
 	return c.runtimeSnapshot(threadID)
+}
+
+func (c *Codex) refreshRuntime(ctx context.Context, threadID string) (runtimeSnapshot, error) {
+	var result struct {
+		Thread struct {
+			Status threadRuntimeStatus `json:"status"`
+		} `json:"thread"`
+	}
+	if err := c.call(ctx, "thread/read", map[string]any{"threadId": threadID, "includeTurns": false}, &result); err != nil {
+		return c.runtimeSnapshot(threadID), err
+	}
+	return c.reconcileRuntime(threadID, result.Thread.Status, nil), nil
 }
 
 func (c *Codex) handleNotification(method string, raw json.RawMessage) {
@@ -1739,7 +1762,14 @@ func (s *server) websocket(w http.ResponseWriter, r *http.Request) {
 				s.codex.hub.broadcast(map[string]any{"type": "subscriptionError", "threadId": command.ThreadID, "message": err.Error()})
 				continue
 			}
-			snapshot, _ := json.Marshal(s.codex.runtimeSnapshot(command.ThreadID))
+			runtimeCtx, runtimeCancel := context.WithTimeout(ctx, 15*time.Second)
+			runtime, runtimeErr := s.codex.refreshRuntime(runtimeCtx, command.ThreadID)
+			runtimeCancel()
+			if runtimeErr != nil {
+				log.Printf("refresh runtime for subscribed thread %s: %v", command.ThreadID, runtimeErr)
+				runtime = s.codex.runtimeSnapshot(command.ThreadID)
+			}
+			snapshot, _ := json.Marshal(runtime)
 			select {
 			case events <- snapshot:
 			default:

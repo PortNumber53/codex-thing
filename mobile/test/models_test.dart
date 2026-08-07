@@ -63,4 +63,25 @@ void main() {
       hasLength(3),
     );
   });
+
+  test('idle thread status clears stale working and approval state', () {
+    final session = MobileSession(localId: 'thread-1', threadId: 'thread-1')
+      ..working = true
+      ..active = true
+      ..turnId = 'turn-1'
+      ..activity = 'Waiting for approval'
+      ..approvals = const [
+        ApprovalRequest(id: 'approval-1', threadId: 'thread-1'),
+      ]
+      ..decidingApprovals.add('approval-1');
+
+    session.applyThreadStatus('idle', const []);
+
+    expect(session.working, isFalse);
+    expect(session.active, isFalse);
+    expect(session.turnId, isEmpty);
+    expect(session.activity, isEmpty);
+    expect(session.approvals, isEmpty);
+    expect(session.decidingApprovals, isEmpty);
+  });
 }

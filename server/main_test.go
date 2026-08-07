@@ -686,6 +686,59 @@ func TestRuntimeSnapshotSurvivesBrowserReconnect(t *testing.T) {
 	}
 }
 
+func TestRefreshRuntimeClearsStaleWorkingState(t *testing.T) {
+	httpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.CloseNow()
+		_, payload, err := conn.Read(r.Context())
+		if err != nil {
+			return
+		}
+		var request envelope
+		if json.Unmarshal(payload, &request) != nil || request.Method != "thread/read" {
+			return
+		}
+		var params struct {
+			ThreadID     string `json:"threadId"`
+			IncludeTurns bool   `json:"includeTurns"`
+		}
+		if json.Unmarshal(request.Params, &params) != nil || params.ThreadID != "thread-1" || params.IncludeTurns {
+			return
+		}
+		response, _ := json.Marshal(map[string]any{
+			"id": json.RawMessage(request.ID),
+			"result": map[string]any{
+				"thread": map[string]any{"status": map[string]string{"type": "idle"}},
+			},
+		})
+		_ = conn.Write(r.Context(), websocket.MessageText, response)
+	}))
+	defer httpServer.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(httpServer.URL, "http"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+	codex := newCodex(conn, "ws://codex.test")
+	codex.active["thread-1"] = activeTurn{TurnID: "turn-1", ActiveFlags: []string{"waitingOnApproval"}}
+	codex.approvals["approval-1"] = pendingApproval{Request: commandApproval{ID: "approval-1", ThreadID: "thread-1"}}
+	go codex.readLoop()
+
+	snapshot, err := codex.refreshRuntime(ctx, "thread-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Working || snapshot.TurnID != "" || len(snapshot.Approvals) != 0 {
+		t.Fatalf("stale runtime survived authoritative idle state: %#v", snapshot)
+	}
+}
+
 func TestServerRequestResolvedClearsApprovalAnsweredByAnotherClient(t *testing.T) {
 	codex := &Codex{
 		hub:    newSocketHub(),

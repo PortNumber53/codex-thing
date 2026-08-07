@@ -686,7 +686,20 @@ class CodexController extends ChangeNotifier {
       unawaited(refreshThreads());
     }
     final session = _sessionByThread(jsonString(params['threadId']));
-    if (session == null || (session.streaming && !allowStreaming)) return;
+    if (session == null) return;
+
+    if (method == 'thread/status/changed') {
+      final status = asJsonMap(params['status']);
+      session.applyThreadStatus(
+        jsonString(status['type']),
+        (status['activeFlags'] as List? ?? const [])
+            .map((flag) => flag.toString())
+            .toList(growable: false),
+      );
+      _notify();
+      return;
+    }
+    if (session.streaming && !allowStreaming) return;
 
     final item = asJsonMap(params['item']);
     switch (method) {

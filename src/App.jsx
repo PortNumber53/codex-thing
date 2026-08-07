@@ -479,7 +479,26 @@ export default function App() {
     if (event.type !== 'notification') return
     const { method, params = {} } = event
     if (['thread/started', 'thread/name/updated', 'thread/archived', 'thread/unarchived', 'thread/deleted'].includes(method)) refreshThreads()
-    if (!params.threadId || params.threadId !== threadIdRef.current || (streamingRef.current && !allowWhileWorking)) return
+    if (!params.threadId || params.threadId !== threadIdRef.current) return
+
+    if (method === 'thread/status/changed') {
+      const runtimeStatus = params.status || {}
+      if (runtimeStatus.type === 'active') {
+        workingRef.current = true
+        setWorking(true)
+        if ((runtimeStatus.activeFlags || []).includes('waitingOnApproval')) setActivity('Waiting for approval')
+        else setActivity(current => current || 'Working')
+      } else if (runtimeStatus.type === 'idle' || runtimeStatus.type === 'systemError') {
+        workingRef.current = false
+        setWorking(false)
+        setTurnId('')
+        setApprovals([])
+        setDecidingApproval('')
+        setActivity('')
+      }
+      return
+    }
+    if (streamingRef.current && !allowWhileWorking) return
 
     if (method === 'turn/started') {
       workingRef.current = true
