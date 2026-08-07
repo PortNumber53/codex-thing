@@ -1784,16 +1784,21 @@ func sse(w io.Writer, event string, data any) {
 }
 
 func main() {
+	appRoot, err := os.Getwd()
+	if err != nil {
+		log.Fatal(err)
+	}
+	if filepath.Base(appRoot) == "server" {
+		appRoot = filepath.Dir(appRoot)
+	}
+	appRoot, err = filepath.Abs(appRoot)
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	workspace := env("CODEX_WORKSPACE", "")
 	if workspace == "" {
-		var err error
-		workspace, err = os.Getwd()
-		if err != nil {
-			log.Fatal(err)
-		}
-		if filepath.Base(workspace) == "server" {
-			workspace = filepath.Dir(workspace)
-		}
+		workspace = appRoot
 	}
 	absWorkspace, err := filepath.Abs(workspace)
 	if err != nil {
@@ -1840,7 +1845,11 @@ func main() {
 	mux.HandleFunc("/api/threads/", s.threads)
 	mux.HandleFunc("/api/chat", s.chat)
 	mux.HandleFunc("/api/interrupt", s.interrupt)
-	dist := http.Dir(filepath.Join(absWorkspace, "dist"))
+	distPath, err := filepath.Abs(env("WEB_DIST", filepath.Join(appRoot, "dist")))
+	if err != nil {
+		log.Fatalf("invalid WEB_DIST: %v", err)
+	}
+	dist := http.Dir(distPath)
 	mux.Handle("/", spaHandler(dist))
 
 	address := "0.0.0.0:" + env("PORT", "40001")
@@ -1848,6 +1857,7 @@ func main() {
 	log.Printf("shared Codex app-server listening at %s", appServerURL)
 	log.Printf("remote TUI: codex resume --remote %s <SESSION_ID>", appServerURL)
 	log.Printf("workspace: %s", absWorkspace)
+	log.Printf("web assets: %s", distPath)
 	if err := http.ListenAndServe(address, securityHeaders(mux)); err != nil {
 		log.Fatal(err)
 	}
