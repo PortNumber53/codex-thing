@@ -112,6 +112,15 @@ void main() {
 
     expect(find.text('Codex server'), findsOneWidget);
     expect(find.text('Server URL'), findsOneWidget);
+    expect(find.text('Keep connected in background'), findsOneWidget);
+
+    await tester.tap(find.byType(Switch));
+    await tester.tap(find.widgetWithText(FilledButton, 'Save'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+
+    expect(controller.backgroundConnectionEnabled, isFalse);
+    expect(find.text('Settings updated.'), findsOneWidget);
   });
 
   testWidgets('session picker reorders without changing the selected session', (

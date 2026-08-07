@@ -214,18 +214,26 @@ class _CodexHomeState extends State<CodexHome> {
   }
 
   Future<void> _showSettings() async {
-    final changed = await showDialog<String>(
+    final changed = await showDialog<ServerSettingsResult>(
       context: context,
-      builder: (context) =>
-          ServerSettingsDialog(initialUrl: widget.controller.serverUrl),
+      builder: (context) => ServerSettingsDialog(
+        initialUrl: widget.controller.serverUrl,
+        initialBackgroundConnectionEnabled:
+            widget.controller.backgroundConnectionEnabled,
+      ),
     );
     if (changed == null || !mounted) return;
     try {
-      await widget.controller.updateServerUrl(changed);
+      await widget.controller.updateBackgroundConnection(
+        changed.backgroundConnectionEnabled,
+      );
+      if (changed.url != widget.controller.serverUrl) {
+        await widget.controller.updateServerUrl(changed.url);
+      }
       if (mounted) {
         ScaffoldMessenger.of(
           context,
-        ).showSnackBar(const SnackBar(content: Text('Codex server updated.')));
+        ).showSnackBar(const SnackBar(content: Text('Settings updated.')));
       }
     } catch (error) {
       if (mounted) {

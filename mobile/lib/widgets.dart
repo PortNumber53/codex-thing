@@ -1661,10 +1661,25 @@ class _WorkspacePickerSheetState extends State<WorkspacePickerSheet> {
   );
 }
 
+class ServerSettingsResult {
+  const ServerSettingsResult({
+    required this.url,
+    required this.backgroundConnectionEnabled,
+  });
+
+  final String url;
+  final bool backgroundConnectionEnabled;
+}
+
 class ServerSettingsDialog extends StatefulWidget {
-  const ServerSettingsDialog({super.key, required this.initialUrl});
+  const ServerSettingsDialog({
+    super.key,
+    required this.initialUrl,
+    required this.initialBackgroundConnectionEnabled,
+  });
 
   final String initialUrl;
+  final bool initialBackgroundConnectionEnabled;
 
   @override
   State<ServerSettingsDialog> createState() => _ServerSettingsDialogState();
@@ -1672,12 +1687,14 @@ class ServerSettingsDialog extends StatefulWidget {
 
 class _ServerSettingsDialogState extends State<ServerSettingsDialog> {
   late final TextEditingController url;
+  late bool backgroundConnectionEnabled;
   String error = '';
 
   @override
   void initState() {
     super.initState();
     url = TextEditingController(text: widget.initialUrl);
+    backgroundConnectionEnabled = widget.initialBackgroundConnectionEnabled;
   }
 
   @override
@@ -1709,6 +1726,19 @@ class _ServerSettingsDialogState extends State<ServerSettingsDialog> {
             errorText: error.isEmpty ? null : error,
           ),
         ),
+        const SizedBox(height: 14),
+        SwitchListTile(
+          contentPadding: EdgeInsets.zero,
+          value: backgroundConnectionEnabled,
+          onChanged: (value) {
+            setState(() => backgroundConnectionEnabled = value);
+          },
+          title: const Text('Keep connected in background'),
+          subtitle: const Text(
+            'Shows an ongoing Android notification while Codex keeps live sessions connected.',
+            style: TextStyle(color: _muted, height: 1.35),
+          ),
+        ),
       ],
     ),
     actions: [
@@ -1726,9 +1756,15 @@ class _ServerSettingsDialogState extends State<ServerSettingsDialog> {
             setState(() => error = 'Enter a complete http:// or https:// URL.');
             return;
           }
-          Navigator.pop(context, value);
+          Navigator.pop(
+            context,
+            ServerSettingsResult(
+              url: value,
+              backgroundConnectionEnabled: backgroundConnectionEnabled,
+            ),
+          );
         },
-        child: const Text('Connect'),
+        child: const Text('Save'),
       ),
     ],
   );

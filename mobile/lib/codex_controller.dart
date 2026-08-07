@@ -1,7 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
@@ -65,6 +67,11 @@ class CodexController extends ChangeNotifier {
   );
   static const String _serverPreference = 'codex_server_url';
   static const String _sessionOrderPreference = 'codex_session_order';
+  static const String _backgroundConnectionPreference =
+      'codex_background_connection';
+  static const MethodChannel _backgroundConnectionChannel = MethodChannel(
+    'dev.codexthing.mobile/background_connection',
+  );
 
   late CodexApi _api;
   final bool _preview;
@@ -83,6 +90,8 @@ class CodexController extends ChangeNotifier {
   AuthSnapshot auth = const AuthSnapshot();
   String defaultWorkspace = '';
   String connectionError = '';
+  String backgroundConnectionError = '';
+  bool backgroundConnectionEnabled = true;
   bool socketConnected = false;
   int selectedIndex = 0;
   final List<MobileSession> sessions = [];
@@ -100,6 +109,9 @@ class CodexController extends ChangeNotifier {
       ..addAll(
         _preferences?.getStringList(_sessionOrderPreference) ?? const [],
       );
+    backgroundConnectionEnabled =
+        _preferences?.getBool(_backgroundConnectionPreference) ?? true;
+    await _applyBackgroundConnection(backgroundConnectionEnabled);
     final saved = _preferences?.getString(_serverPreference)?.trim();
     if (saved != null && saved.isNotEmpty && saved != _serverUrl) {
       _api.close();
@@ -515,6 +527,44 @@ class CodexController extends ChangeNotifier {
     selectedIndex = 0;
     auth = const AuthSnapshot();
     await reconnect();
+  }
+
+  Future<void> updateBackgroundConnection(bool enabled) async {
+    if (enabled == backgroundConnectionEnabled &&
+        backgroundConnectionError.isEmpty) {
+      return;
+    }
+    final previous = backgroundConnectionEnabled;
+    backgroundConnectionEnabled = enabled;
+    backgroundConnectionError = '';
+    _notify();
+    try {
+      await _applyBackgroundConnection(enabled, rethrowErrors: true);
+      await _preferences?.setBool(_backgroundConnectionPreference, enabled);
+    } catch (error) {
+      backgroundConnectionEnabled = previous;
+      backgroundConnectionError = error.toString();
+      _notify();
+      rethrow;
+    }
+    _notify();
+  }
+
+  Future<void> _applyBackgroundConnection(
+    bool enabled, {
+    bool rethrowErrors = false,
+  }) async {
+    if (_preview || !Platform.isAndroid) return;
+    try {
+      await _backgroundConnectionChannel.invokeMethod<void>(
+        enabled ? 'start' : 'stop',
+      );
+      backgroundConnectionError = '';
+    } catch (error) {
+      backgroundConnectionError =
+          'Could not ${enabled ? 'start' : 'stop'} background connection: $error';
+      if (rethrowErrors) rethrow;
+    }
   }
 
   Future<void> _connectSocket() async {
