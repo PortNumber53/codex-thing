@@ -703,12 +703,11 @@ class CodexController extends ChangeNotifier {
             .where((text) => text.trim().isNotEmpty)
             .join('\n')
             .trim();
-        if (text.isNotEmpty &&
-            (session.messages.isEmpty ||
-                session.messages.last.role != 'user' ||
-                session.messages.last.text != text)) {
-          session.messages.add(ChatItem(role: 'user', text: text));
-        }
+        session.reconcileUserMessage(
+          id: jsonString(item['id']),
+          text: text,
+          claimOptimistic: allowStreaming && session.streaming,
+        );
       case 'item/agentMessage/delta':
         session.activity = '';
         _appendAssistantDelta(

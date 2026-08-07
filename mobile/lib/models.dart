@@ -325,6 +325,36 @@ class MobileSession {
   List<ApprovalRequest> approvals = [];
   Set<String> decidingApprovals = {};
 
+  void reconcileUserMessage({
+    required String id,
+    required String text,
+    required bool claimOptimistic,
+  }) {
+    if (text.isEmpty) return;
+    if (id.isNotEmpty && messages.any((message) => message.id == id)) return;
+
+    if (claimOptimistic) {
+      for (var index = messages.length - 1; index >= 0; index -= 1) {
+        final message = messages[index];
+        if (message.role == 'user' &&
+            message.id.isEmpty &&
+            message.text == text) {
+          messages[index] = message.copyWith(id: id);
+          return;
+        }
+      }
+    }
+
+    if (id.isEmpty) {
+      final latestUser = messages.lastWhere(
+        (message) => message.role == 'user',
+        orElse: () => const ChatItem(),
+      );
+      if (latestUser.text == text) return;
+    }
+    messages.add(ChatItem(id: id, role: 'user', text: text));
+  }
+
   void updateSummary(ThreadSummary summary) {
     title = summary.title;
     preview = summary.preview;

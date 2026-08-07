@@ -233,6 +233,10 @@ void main() {
   testWidgets(
     'sessions retain transcript position and offer a latest shortcut',
     (tester) async {
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = const Size(800, 600);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      addTearDown(tester.view.resetPhysicalSize);
       final controller = CodexController(preview: true);
       controller.sessions.first.messages = List.generate(
         30,
@@ -269,6 +273,20 @@ void main() {
 
       expect(firstPosition.pixels, closeTo(firstPosition.maxScrollExtent, 1));
       expect(find.byTooltip('Scroll to latest'), findsNothing);
+
+      tester.view.physicalSize = const Size(800, 450);
+      await tester.pumpAndSettle();
+
+      expect(firstPosition.pixels, closeTo(firstPosition.maxScrollExtent, 1));
+      expect(find.byTooltip('Scroll to latest'), findsNothing);
+
+      await tester.drag(firstTranscript, const Offset(0, 180));
+      await tester.pumpAndSettle();
+      tester.view.physicalSize = const Size(800, 400);
+      await tester.pumpAndSettle();
+
+      expect(firstPosition.pixels, lessThan(firstPosition.maxScrollExtent));
+      expect(find.byTooltip('Scroll to latest'), findsOneWidget);
     },
   );
 
