@@ -59,6 +59,11 @@ When a browser reconnects, the bridge reads the stored thread and combines it
 with the current runtime snapshot. This restores working state, the active turn,
 and unresolved approval prompts without relying on interval polling.
 
+The base web URL never selects a recent thread automatically. Selecting or
+creating a thread adds its ID to the URL explicitly so refreshing that specific
+URL can restore the active runtime. Choosing **New conversation** returns to the
+unselected base URL.
+
 ## Components
 
 | Component | Responsibility |

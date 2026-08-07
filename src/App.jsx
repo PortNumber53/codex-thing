@@ -1,6 +1,19 @@
 import { useEffect, useRef, useState } from 'react'
 
-const STORAGE_KEY = 'codex-local-thread'
+const THREAD_QUERY_PARAM = 'thread'
+const LEGACY_STORAGE_KEY = 'codex-local-thread'
+
+function threadFromLocation() {
+  const threadId = new URLSearchParams(window.location.search).get(THREAD_QUERY_PARAM) || ''
+  return threadId.length <= 128 && !/[\\/]/.test(threadId) ? threadId : ''
+}
+
+function setThreadInLocation(threadId) {
+  const url = new URL(window.location.href)
+  if (threadId) url.searchParams.set(THREAD_QUERY_PARAM, threadId)
+  else url.searchParams.delete(THREAD_QUERY_PARAM)
+  window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}${url.hash}`)
+}
 
 function workspaceName(path) {
   const parts = (path || '').split('/').filter(Boolean)
@@ -202,7 +215,7 @@ function EmptyState({ onPrompt }) {
 export default function App() {
   const [messages, setMessages] = useState([])
   const [input, setInput] = useState('')
-  const [threadId, setThreadId] = useState(() => localStorage.getItem(STORAGE_KEY) || '')
+  const [threadId, setThreadId] = useState(threadFromLocation)
   const [turnId, setTurnId] = useState('')
   const [working, setWorking] = useState(false)
   const [status, setStatus] = useState('connecting')
@@ -296,6 +309,7 @@ export default function App() {
   }, [])
 
   useEffect(() => {
+    try { localStorage.removeItem(LEGACY_STORAGE_KEY) } catch { /* local storage may be unavailable */ }
     refreshThreads()
     if (threadId) openThread(threadId)
   }, [])
@@ -426,8 +440,9 @@ export default function App() {
       const data = await response.json()
       const incoming = data.messages || []
       setMessages(current => messagesMatch(current, incoming) ? current : incoming)
-      setThreadId(data.threadId || id)
-      threadIdRef.current = data.threadId || id
+      const selectedThreadId = data.threadId || id
+      setThreadId(selectedThreadId)
+      threadIdRef.current = selectedThreadId
       if (data.workspace) {
         workspaceRef.current = data.workspace
         setWorkspace(data.workspace)
@@ -436,7 +451,7 @@ export default function App() {
         refreshThreads(data.workspace)
       }
       applyRuntimeSnapshot(data.runtime || { threadId: data.threadId || id, working: false, approvals: [] })
-      localStorage.setItem(STORAGE_KEY, data.threadId || id)
+      setThreadInLocation(selectedThreadId)
     } catch (error) {
       if (!silent) setMessages([{ role: 'assistant', text: `I couldn't load that session: ${error.message}`, error: true }])
     } finally {
@@ -459,11 +474,12 @@ export default function App() {
     }
     setMessages([])
     setThreadId('')
+    threadIdRef.current = ''
     setTurnId('')
     setActivity('')
     setApprovals([])
     setApprovalError('')
-    localStorage.removeItem(STORAGE_KEY)
+    setThreadInLocation('')
     textareaRef.current?.focus()
   }
 
@@ -506,7 +522,7 @@ export default function App() {
             workspaceRef.current = payload.workspace
             setWorkspace(payload.workspace)
           }
-          localStorage.setItem(STORAGE_KEY, payload.threadId)
+          setThreadInLocation(payload.threadId)
         } else if (eventName === 'delta') {
           setActivity('')
           setMessages(current => appendAssistantDelta(current, payload.text, payload.itemId))
@@ -618,7 +634,7 @@ export default function App() {
         {workspaceError && <span className="workspace-error">{workspaceError}</span>}
       </div>
       <div className="nav-label">WORKSPACE</div>
-      <button className="workspace" onClick={() => openThread(threadId || threads[0]?.id)} disabled={working || (!threadId && !threads.length)}><Icon name="code" /><div><strong>{workspaceName(workspace || defaultWorkspace)}</strong><span>{workspace || defaultWorkspace || 'Loading workspace…'}</span></div></button>
+      <button className="workspace" onClick={() => openThread(threadId)} disabled={working || !threadId}><Icon name="code" /><div><strong>{workspaceName(workspace || defaultWorkspace)}</strong><span>{workspace || defaultWorkspace || 'Loading workspace…'}</span></div></button>
       <div className="nav-label recent-label">RECENT SESSIONS</div>
       <div className="thread-list">
         {threads.map(thread => <button key={thread.id} className={thread.id === threadId ? 'active' : ''} onClick={() => openThread(thread.id)} disabled={working} title={thread.preview || thread.title}>
