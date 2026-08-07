@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'codex_controller.dart';
+import 'models.dart';
 import 'widgets.dart';
 
 Future<void> main() async {
@@ -241,6 +242,47 @@ class _CodexHomeState extends State<CodexHome> {
           controller.connection == BridgeConnection.ready &&
           !controller.auth.authenticated;
       final keyboardInset = MediaQuery.viewInsetsOf(context).bottom;
+      final displaySize = MediaQuery.sizeOf(context);
+      final dualPane =
+          displaySize.width >= 900 && displaySize.width > displaySize.height;
+      if (dualPane) {
+        final sessionCount = controller.sessions.length;
+        final primaryIndex = sessionCount == 0
+            ? 0
+            : controller.selectedIndex.clamp(0, sessionCount - 1);
+        final secondaryIndex = sessionCount < 2
+            ? primaryIndex
+            : (primaryIndex + 1) % sessionCount;
+        return Scaffold(
+          resizeToAvoidBottomInset: false,
+          body: SafeArea(
+            bottom: false,
+            child: Row(
+              children: [
+                Expanded(
+                  child: _LandscapeConversationPane(
+                    key: const ValueKey('landscape-primary'),
+                    controller: controller,
+                    initialIndex: primaryIndex,
+                    primary: true,
+                    onSettings: _showSettings,
+                  ),
+                ),
+                const VerticalDivider(width: 1, thickness: 1),
+                Expanded(
+                  child: _LandscapeConversationPane(
+                    key: const ValueKey('landscape-secondary'),
+                    controller: controller,
+                    initialIndex: secondaryIndex,
+                    primary: false,
+                    onSettings: _showSettings,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      }
       return Scaffold(
         resizeToAvoidBottomInset: false,
         body: SafeArea(
@@ -329,4 +371,273 @@ class _CodexHomeState extends State<CodexHome> {
       );
     },
   );
+}
+
+class _LandscapeConversationPane extends StatefulWidget {
+  const _LandscapeConversationPane({
+    super.key,
+    required this.controller,
+    required this.initialIndex,
+    required this.primary,
+    required this.onSettings,
+  });
+
+  final CodexController controller;
+  final int initialIndex;
+  final bool primary;
+  final VoidCallback onSettings;
+
+  @override
+  State<_LandscapeConversationPane> createState() =>
+      _LandscapeConversationPaneState();
+}
+
+class _LandscapeConversationPaneState
+    extends State<_LandscapeConversationPane> {
+  late final PageController _pages;
+  final TextEditingController _composer = TextEditingController();
+  final FocusNode _composerFocus = FocusNode();
+  late int _selectedIndex;
+  late bool _hadSessions;
+  String _composerSessionId = '';
+
+  MobileSession? get _session {
+    if (widget.controller.sessions.isEmpty) return null;
+    return widget.controller.sessions[_selectedIndex.clamp(
+      0,
+      widget.controller.sessions.length - 1,
+    )];
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _hadSessions = widget.controller.sessions.isNotEmpty;
+    _selectedIndex = _normalizedIndex(widget.initialIndex);
+    _pages = PageController(initialPage: _selectedIndex);
+    _syncComposer();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final session = _session;
+      if (session != null) unawaited(widget.controller.openSession(session));
+    });
+  }
+
+  @override
+  void didUpdateWidget(covariant _LandscapeConversationPane oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final hasSessions = widget.controller.sessions.isNotEmpty;
+    final normalized = _normalizedIndex(
+      !_hadSessions && hasSessions ? widget.initialIndex : _selectedIndex,
+    );
+    _hadSessions = hasSessions;
+    if (normalized != _selectedIndex) {
+      _selectedIndex = normalized;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (_pages.hasClients) _pages.jumpToPage(_selectedIndex);
+      });
+    }
+    _syncComposer();
+    final session = _session;
+    if (session != null && !session.loaded && !session.loading) {
+      unawaited(widget.controller.openSession(session));
+    }
+  }
+
+  @override
+  void dispose() {
+    _pages.dispose();
+    _composer.dispose();
+    _composerFocus.dispose();
+    super.dispose();
+  }
+
+  int _normalizedIndex(int index) {
+    final count = widget.controller.sessions.length;
+    return count == 0 ? 0 : index.clamp(0, count - 1);
+  }
+
+  void _syncComposer() {
+    final session = _session;
+    if (session == null || session.localId == _composerSessionId) return;
+    _composerSessionId = session.localId;
+    _composer.value = TextEditingValue(
+      text: session.composerText,
+      selection: TextSelection.collapsed(offset: session.composerText.length),
+    );
+  }
+
+  Future<void> _selectPage(int index) async {
+    final oldSession = _session;
+    if (oldSession != null) oldSession.composerText = _composer.text;
+    if (mounted) setState(() => _selectedIndex = _normalizedIndex(index));
+    _syncComposer();
+    final session = _session;
+    if (session == null) return;
+    if (widget.primary) {
+      await widget.controller.selectSession(_selectedIndex);
+    } else {
+      await widget.controller.openSession(session);
+    }
+  }
+
+  Future<void> _newConversation() async {
+    final workspace = await showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      backgroundColor: const Color(0xFF171A20),
+      builder: (context) => WorkspacePickerSheet(
+        controller: widget.controller,
+        initialPath: widget.controller.defaultWorkspace,
+      ),
+    );
+    if (!mounted || workspace == null) return;
+    final draft = widget.controller.createDraft(
+      workspace,
+      select: widget.primary,
+    );
+    _selectedIndex = widget.controller.sessions.indexOf(draft);
+    _composerSessionId = draft.localId;
+    _composer.clear();
+    setState(() {});
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_pages.hasClients) {
+        _pages.animateToPage(
+          _selectedIndex,
+          duration: const Duration(milliseconds: 320),
+          curve: Curves.easeOutCubic,
+        );
+      }
+      _composerFocus.requestFocus();
+    });
+  }
+
+  Future<void> _showSessions() async {
+    final selected = await showModalBottomSheet<int>(
+      context: context,
+      useSafeArea: true,
+      showDragHandle: true,
+      backgroundColor: const Color(0xFF171A20),
+      builder: (context) => SessionPickerSheet(
+        sessions: widget.controller.sessions,
+        selectedIndex: _selectedIndex,
+        onRename: widget.controller.renameSession,
+        onNew: () {
+          Navigator.pop(context);
+          unawaited(_newConversation());
+        },
+      ),
+    );
+    if (selected == null || !mounted) return;
+    await _selectPage(selected);
+    if (_pages.hasClients) {
+      await _pages.animateToPage(
+        selected,
+        duration: const Duration(milliseconds: 300),
+        curve: Curves.easeOutCubic,
+      );
+    }
+  }
+
+  Future<void> _send() async {
+    final session = _session;
+    final text = _composer.text.trim();
+    if (session == null || text.isEmpty) return;
+    _composer.clear();
+    session.composerText = '';
+    await widget.controller.sendMessage(session, text);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final controller = widget.controller;
+    final selectedIndex = _normalizedIndex(_selectedIndex);
+    final session = _session;
+    final authBlocked =
+        controller.connection == BridgeConnection.ready &&
+        !controller.auth.authenticated;
+    final keyboardInset = MediaQuery.viewInsetsOf(context).bottom;
+    return Column(
+      children: [
+        PersistentActionBar(
+          connection: controller.connection,
+          session: session,
+          socketConnected: controller.socketConnected,
+          authBlocked: authBlocked,
+          hasSessions: controller.sessions.isNotEmpty,
+          onSessions: _showSessions,
+          onNew: _newConversation,
+          onSettings: widget.onSettings,
+        ),
+        Expanded(
+          child: switch (controller.connection) {
+            BridgeConnection.connecting => const ConnectionStateView(
+              title: 'Connecting to Codex…',
+              message: 'Looking for the shared app-server bridge.',
+              loading: true,
+            ),
+            BridgeConnection.offline => ConnectionStateView(
+              title: 'Codex is offline',
+              message: controller.connectionError.isEmpty
+                  ? 'The mobile app could not reach the Go bridge.'
+                  : controller.connectionError,
+              onRetry: controller.reconnect,
+            ),
+            BridgeConnection.ready when authBlocked => AuthView(
+              auth: controller.auth,
+              onRetry: controller.requestDeviceLogin,
+            ),
+            BridgeConnection.ready =>
+              controller.sessions.isEmpty
+                  ? ConnectionStateView(
+                      title: 'No conversations yet',
+                      message: 'Start a conversation in any workspace.',
+                      onRetry: _newConversation,
+                      retryLabel: 'New conversation',
+                    )
+                  : PageView.builder(
+                      controller: _pages,
+                      physics: const PageScrollPhysics(),
+                      onPageChanged: _selectPage,
+                      itemCount: controller.sessions.length,
+                      itemBuilder: (context, index) => SessionPage(
+                        key: ValueKey(
+                          '${widget.primary ? 'primary' : 'secondary'}-${controller.sessions[index].localId}',
+                        ),
+                        session: controller.sessions[index],
+                        onPrompt: (prompt) {
+                          _composer.text = prompt;
+                          _send();
+                        },
+                        onApproval: controller.decideApproval,
+                      ),
+                    ),
+          },
+        ),
+        AnimatedPadding(
+          duration: const Duration(milliseconds: 180),
+          curve: Curves.easeOutCubic,
+          padding: EdgeInsets.only(bottom: keyboardInset),
+          child: ComposerBar(
+            controller: _composer,
+            focusNode: _composerFocus,
+            session: session,
+            sessionIndex: selectedIndex,
+            sessionCount: controller.sessions.length,
+            enabled:
+                controller.connection == BridgeConnection.ready &&
+                controller.auth.authenticated,
+            onChanged: (value) {
+              final current = _session;
+              if (current != null) current.composerText = value;
+            },
+            onSend: _send,
+            onStop: session == null
+                ? null
+                : () => controller.interrupt(session),
+          ),
+        ),
+      ],
+    );
+  }
 }

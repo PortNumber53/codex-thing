@@ -203,6 +203,10 @@ class CodexController extends ChangeNotifier {
     selectedIndex = index.clamp(0, sessions.length - 1);
     final session = sessions[selectedIndex];
     _notify();
+    await openSession(session);
+  }
+
+  Future<void> openSession(MobileSession session) async {
     if (session.threadId.isNotEmpty) {
       subscribe(session.threadId);
       await loadSession(session);
@@ -243,12 +247,12 @@ class CodexController extends ChangeNotifier {
     }
   }
 
-  MobileSession createDraft([String workspace = '']) {
+  MobileSession createDraft(String workspace, {bool select = true}) {
     final draft = _addDraft(
       workspace.trim().isEmpty ? defaultWorkspace : workspace.trim(),
       notify: false,
     );
-    selectedIndex = sessions.indexOf(draft);
+    if (select) selectedIndex = sessions.indexOf(draft);
     _notify();
     return draft;
   }

@@ -38,10 +38,88 @@ class SessionPage extends StatefulWidget {
   State<SessionPage> createState() => _SessionPageState();
 }
 
-class _SessionPageState extends State<SessionPage> {
+class _SessionPageState extends State<SessionPage>
+    with AutomaticKeepAliveClientMixin<SessionPage> {
   final ScrollController _scroll = ScrollController();
   int _lastItemCount = 0;
   int _lastTextLength = 0;
+  double _lastKeyboardInset = 0;
+  bool _pinToBottomDuringKeyboardOpen = false;
+  bool _bottomPinScheduled = false;
+  bool _scrollAffordanceScheduled = false;
+  bool _showScrollToBottom = false;
+
+  @override
+  bool get wantKeepAlive => true;
+
+  @override
+  void initState() {
+    super.initState();
+    _scroll.addListener(_updateScrollAffordance);
+    _updateScrollAffordanceAfterLayout();
+  }
+
+  void _updateScrollAffordance() {
+    if (!mounted || !_scroll.hasClients) return;
+    final shouldShow = _scroll.position.extentAfter > 160;
+    if (shouldShow != _showScrollToBottom) {
+      setState(() => _showScrollToBottom = shouldShow);
+    }
+  }
+
+  void _updateScrollAffordanceAfterLayout() {
+    if (_scrollAffordanceScheduled) return;
+    _scrollAffordanceScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _scrollAffordanceScheduled = false;
+      _updateScrollAffordance();
+    });
+  }
+
+  Future<void> _scrollToBottom() async {
+    if (!_scroll.hasClients) return;
+    await _scroll.animateTo(
+      _scroll.position.maxScrollExtent,
+      duration: const Duration(milliseconds: 260),
+      curve: Curves.easeOutCubic,
+    );
+    if (_scroll.hasClients) {
+      _scroll.jumpTo(_scroll.position.maxScrollExtent);
+    }
+  }
+
+  void _pinBottomAfterLayout() {
+    if (_bottomPinScheduled) return;
+    _bottomPinScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _bottomPinScheduled = false;
+      if (!mounted || !_pinToBottomDuringKeyboardOpen || !_scroll.hasClients) {
+        return;
+      }
+      _scroll.jumpTo(_scroll.position.maxScrollExtent);
+    });
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final keyboardInset = MediaQuery.viewInsetsOf(context).bottom;
+    if (keyboardInset == _lastKeyboardInset) return;
+
+    final keyboardOpening = keyboardInset > _lastKeyboardInset;
+    if (_lastKeyboardInset == 0 && keyboardInset > 0) {
+      _pinToBottomDuringKeyboardOpen =
+          !_scroll.hasClients ||
+          _scroll.position.maxScrollExtent - _scroll.position.pixels <= 48;
+    }
+    _lastKeyboardInset = keyboardInset;
+
+    if (keyboardOpening && _pinToBottomDuringKeyboardOpen) {
+      _pinBottomAfterLayout();
+    } else if (keyboardInset == 0) {
+      _pinToBottomDuringKeyboardOpen = false;
+    }
+  }
 
   @override
   void didUpdateWidget(covariant SessionPage oldWidget) {
@@ -69,89 +147,122 @@ class _SessionPageState extends State<SessionPage> {
 
   @override
   void dispose() {
+    _scroll.removeListener(_updateScrollAffordance);
     _scroll.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    super.build(context);
     final session = widget.session;
     return session.loading && !session.loaded
         ? const Center(child: CircularProgressIndicator())
-        : CustomScrollView(
-            controller: _scroll,
-            keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
-            slivers: [
-              if (session.error.isNotEmpty)
-                SliverToBoxAdapter(
-                  child: _ReadableWidth(
-                    child: _InlineError(message: session.error),
-                  ),
-                ),
-              if (session.messages.isEmpty)
-                SliverFillRemaining(
-                  hasScrollBody: false,
-                  child: EmptyConversation(onPrompt: widget.onPrompt),
-                )
-              else
-                SliverPadding(
-                  padding: const EdgeInsets.fromLTRB(16, 14, 16, 24),
-                  sliver: SliverList.builder(
-                    itemCount: session.messages.length,
-                    itemBuilder: (context, index) => _ReadableWidth(
-                      child: TranscriptItem(
-                        item: session.messages[index],
-                        isLast: index == session.messages.length - 1,
-                      ),
-                    ),
-                  ),
-                ),
-              if (session.activity.isNotEmpty)
-                SliverToBoxAdapter(
-                  child: _ReadableWidth(
-                    child: Padding(
-                      padding: const EdgeInsets.fromLTRB(22, 0, 22, 12),
-                      child: Row(
-                        children: [
-                          const SizedBox.square(
-                            dimension: 14,
-                            child: CircularProgressIndicator(strokeWidth: 1.8),
-                          ),
-                          const SizedBox(width: 10),
-                          Text(
-                            session.activity,
-                            style: const TextStyle(color: _muted),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-              if (session.approvals.isNotEmpty)
-                SliverPadding(
-                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
-                  sliver: SliverList.builder(
-                    itemCount: session.approvals.length,
-                    itemBuilder: (context, index) {
-                      final approval = session.approvals[index];
-                      return _ReadableWidth(
-                        child: ApprovalCard(
-                          key: ValueKey(approval.id),
-                          approval: approval,
-                          deciding: session.decidingApprovals.contains(
-                            approval.id,
-                          ),
-                          onDecision: (decision, {answers, content}) =>
-                              widget.onApproval(
-                                session,
-                                approval,
-                                decision,
-                                answers: answers,
-                                content: content,
-                              ),
+        : Stack(
+            fit: StackFit.expand,
+            children: [
+              NotificationListener<ScrollMetricsNotification>(
+                onNotification: (_) {
+                  _updateScrollAffordanceAfterLayout();
+                  if (_lastKeyboardInset > 0 &&
+                      _pinToBottomDuringKeyboardOpen) {
+                    _pinBottomAfterLayout();
+                  }
+                  return false;
+                },
+                child: CustomScrollView(
+                  controller: _scroll,
+                  keyboardDismissBehavior:
+                      ScrollViewKeyboardDismissBehavior.manual,
+                  slivers: [
+                    if (session.error.isNotEmpty)
+                      SliverToBoxAdapter(
+                        child: _ReadableWidth(
+                          child: _InlineError(message: session.error),
                         ),
-                      );
-                    },
+                      ),
+                    if (session.messages.isEmpty)
+                      SliverFillRemaining(
+                        hasScrollBody: false,
+                        child: EmptyConversation(onPrompt: widget.onPrompt),
+                      )
+                    else
+                      SliverPadding(
+                        padding: const EdgeInsets.fromLTRB(16, 14, 16, 24),
+                        sliver: SliverList.builder(
+                          itemCount: session.messages.length,
+                          itemBuilder: (context, index) => _ReadableWidth(
+                            child: TranscriptItem(
+                              item: session.messages[index],
+                              isLast: index == session.messages.length - 1,
+                            ),
+                          ),
+                        ),
+                      ),
+                    if (session.activity.isNotEmpty)
+                      SliverToBoxAdapter(
+                        child: _ReadableWidth(
+                          child: Padding(
+                            padding: const EdgeInsets.fromLTRB(22, 0, 22, 12),
+                            child: Row(
+                              children: [
+                                const SizedBox.square(
+                                  dimension: 14,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 1.8,
+                                  ),
+                                ),
+                                const SizedBox(width: 10),
+                                Text(
+                                  session.activity,
+                                  style: const TextStyle(color: _muted),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                    if (session.approvals.isNotEmpty)
+                      SliverPadding(
+                        padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
+                        sliver: SliverList.builder(
+                          itemCount: session.approvals.length,
+                          itemBuilder: (context, index) {
+                            final approval = session.approvals[index];
+                            return _ReadableWidth(
+                              child: ApprovalCard(
+                                key: ValueKey(approval.id),
+                                approval: approval,
+                                deciding: session.decidingApprovals.contains(
+                                  approval.id,
+                                ),
+                                onDecision: (decision, {answers, content}) =>
+                                    widget.onApproval(
+                                      session,
+                                      approval,
+                                      decision,
+                                      answers: answers,
+                                      content: content,
+                                    ),
+                              ),
+                            );
+                          },
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+              if (_showScrollToBottom)
+                Positioned(
+                  right: 16,
+                  bottom: 16,
+                  child: FloatingActionButton.small(
+                    heroTag: null,
+                    onPressed: _scrollToBottom,
+                    tooltip: 'Scroll to latest',
+                    backgroundColor: _raised,
+                    foregroundColor: _accent,
+                    child: const Icon(Icons.keyboard_arrow_down_rounded),
                   ),
                 ),
             ],

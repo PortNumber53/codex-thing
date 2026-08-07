@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mobile/codex_controller.dart';
 import 'package:mobile/main.dart';
+import 'package:mobile/models.dart';
 import 'package:mobile/widgets.dart';
 
 void main() {
@@ -131,5 +132,144 @@ void main() {
         MediaQuery.sizeOf(composerContext).height -
         MediaQuery.viewInsetsOf(composerContext).bottom;
     expect(tester.getBottomRight(composer).dy, lessThanOrEqualTo(keyboardTop));
+  });
+
+  testWidgets(
+    'opening and scrolling above the keyboard keeps the transcript bottom visible',
+    (tester) async {
+      final controller = CodexController(preview: true);
+      controller.sessions.first.messages = List.generate(
+        30,
+        (index) => ChatItem(
+          role: index.isEven ? 'user' : 'assistant',
+          text:
+              'Transcript entry $index with enough text to remain scrollable.',
+        ),
+      );
+      addTearDown(controller.dispose);
+      addTearDown(() => tester.view.resetViewInsets());
+
+      await tester.pumpWidget(CodexMobileApp(controller: controller));
+      await tester.pumpAndSettle();
+
+      final transcript = find.byType(CustomScrollView).first;
+      final position = tester
+          .widget<CustomScrollView>(transcript)
+          .controller!
+          .position;
+      position.jumpTo(position.maxScrollExtent);
+      await tester.pump();
+
+      final composerField = find.descendant(
+        of: find.byType(ComposerBar),
+        matching: find.byType(TextField),
+      );
+      await tester.tap(composerField);
+      tester.view.viewInsets = const FakeViewPadding(bottom: 900);
+      await tester.pumpAndSettle();
+
+      expect(position.pixels, closeTo(position.maxScrollExtent, 1));
+      expect(
+        tester.widget<TextField>(composerField).focusNode?.hasFocus,
+        isTrue,
+      );
+
+      await tester.drag(transcript, const Offset(0, -80));
+      await tester.pumpAndSettle();
+
+      expect(
+        tester.widget<TextField>(composerField).focusNode?.hasFocus,
+        isTrue,
+      );
+    },
+  );
+
+  testWidgets(
+    'sessions retain transcript position and offer a latest shortcut',
+    (tester) async {
+      final controller = CodexController(preview: true);
+      controller.sessions.first.messages = List.generate(
+        30,
+        (index) => ChatItem(
+          role: index.isEven ? 'user' : 'assistant',
+          text: 'Scrollable session entry $index with a useful amount of text.',
+        ),
+      );
+      addTearDown(controller.dispose);
+
+      await tester.pumpWidget(CodexMobileApp(controller: controller));
+      await tester.pumpAndSettle();
+
+      final firstTranscript = find.byType(CustomScrollView).first;
+      final firstPosition = tester
+          .widget<CustomScrollView>(firstTranscript)
+          .controller!
+          .position;
+      firstPosition.jumpTo(firstPosition.maxScrollExtent / 2);
+      await tester.pumpAndSettle();
+      final savedOffset = firstPosition.pixels;
+
+      expect(find.byTooltip('Scroll to latest'), findsOneWidget);
+
+      await tester.fling(find.byType(PageView), const Offset(-500, 0), 1000);
+      await tester.pumpAndSettle();
+      await tester.fling(find.byType(PageView), const Offset(500, 0), 1000);
+      await tester.pumpAndSettle();
+
+      expect(firstPosition.pixels, closeTo(savedOffset, 1));
+
+      await tester.tap(find.byTooltip('Scroll to latest'));
+      await tester.pumpAndSettle();
+
+      expect(firstPosition.pixels, closeTo(firstPosition.maxScrollExtent, 1));
+      expect(find.byTooltip('Scroll to latest'), findsNothing);
+    },
+  );
+
+  testWidgets('large landscape displays show two independent conversations', (
+    tester,
+  ) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(1200, 800);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(tester.view.resetPhysicalSize);
+    final controller = CodexController(preview: true);
+    final loadedSessions = List<MobileSession>.of(controller.sessions);
+    controller.sessions.clear();
+    addTearDown(controller.dispose);
+
+    await tester.pumpWidget(CodexMobileApp(controller: controller));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(PersistentActionBar), findsNWidgets(2));
+    expect(find.byType(ComposerBar), findsNWidgets(2));
+    expect(find.byType(PageView), findsNothing);
+
+    controller.sessions.addAll(loadedSessions);
+    await controller.selectSession(0);
+    await tester.pumpAndSettle();
+
+    expect(find.byType(PageView), findsNWidgets(2));
+
+    final pageViews = tester
+        .widgetList<PageView>(find.byType(PageView))
+        .toList();
+    final primaryPages = pageViews[0].controller!;
+    final secondaryPages = pageViews[1].controller!;
+    expect(primaryPages.page, closeTo(0, .01));
+    expect(secondaryPages.page, closeTo(1, .01));
+
+    await tester.fling(find.byType(PageView).at(1), const Offset(500, 0), 1000);
+    await tester.pumpAndSettle();
+
+    expect(primaryPages.page, closeTo(0, .01));
+    expect(secondaryPages.page, closeTo(0, .01));
+
+    tester.view.physicalSize = const Size(800, 1200);
+    await tester.pumpAndSettle();
+
+    expect(find.byType(PersistentActionBar), findsOneWidget);
+    expect(find.byType(ComposerBar), findsOneWidget);
+    expect(find.byType(PageView), findsOneWidget);
   });
 }
