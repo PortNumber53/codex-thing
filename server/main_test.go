@@ -91,6 +91,20 @@ func TestAuthStateFromAccount(t *testing.T) {
 	}
 }
 
+func TestThreadListParamsCanSpanAllWorkspaces(t *testing.T) {
+	scoped := threadListParams("/workspace/project", false)
+	if scoped["cwd"] != "/workspace/project" {
+		t.Fatalf("scoped thread list lost its workspace: %#v", scoped)
+	}
+	all := threadListParams("/workspace/project", true)
+	if _, exists := all["cwd"]; exists {
+		t.Fatalf("all-workspace thread list unexpectedly filters cwd: %#v", all)
+	}
+	if all["limit"] != 40 || all["sortDirection"] != "desc" {
+		t.Fatalf("all-workspace thread list lost paging options: %#v", all)
+	}
+}
+
 func TestRefreshAuthStartsDeviceLoginWhenRequired(t *testing.T) {
 	httpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := websocket.Accept(w, r, nil)

@@ -1771,10 +1771,15 @@ func (s *server) threads(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
-	workspace, err := resolveWorkspace(r.URL.Query().Get("cwd"), s.workspace)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
+	allWorkspaces := r.URL.Query().Get("scope") == "all"
+	workspace := s.workspace
+	if !allWorkspaces {
+		var err error
+		workspace, err = resolveWorkspace(r.URL.Query().Get("cwd"), s.workspace)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 	}
 	var result struct {
 		Data []struct {
@@ -1786,12 +1791,8 @@ func (s *server) threads(w http.ResponseWriter, r *http.Request) {
 			CWD       string `json:"cwd"`
 		} `json:"data"`
 	}
-	err = s.codex.call(ctx, "thread/list", map[string]any{
-		"cwd":           workspace,
-		"limit":         40,
-		"sortKey":       "updated_at",
-		"sortDirection": "desc",
-	}, &result)
+	listParams := threadListParams(workspace, allWorkspaces)
+	err := s.codex.call(ctx, "thread/list", listParams, &result)
 	if err != nil {
 		http.Error(w, "list threads: "+err.Error(), http.StatusBadGateway)
 		return
@@ -1807,7 +1808,7 @@ func (s *server) threads(w http.ResponseWriter, r *http.Request) {
 		threads = append(threads, threadSummary{ID: item.ID, Title: title, Preview: item.Preview, UpdatedAt: item.UpdatedAt, Status: item.Status, CWD: item.CWD})
 		seen[item.ID] = true
 	}
-	if workspace == s.workspace {
+	if allWorkspaces || workspace == s.workspace {
 		for index := len(s.bootstrapThreads) - 1; index >= 0; index-- {
 			id := s.bootstrapThreads[index]
 			if seen[id] {
@@ -1836,6 +1837,18 @@ func (s *server) threads(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"threads": threads, "workspace": workspace})
+}
+
+func threadListParams(workspace string, allWorkspaces bool) map[string]any {
+	params := map[string]any{
+		"limit":         40,
+		"sortKey":       "updated_at",
+		"sortDirection": "desc",
+	}
+	if !allWorkspaces {
+		params["cwd"] = workspace
+	}
+	return params
 }
 
 func (s *server) threadHistory(w http.ResponseWriter, r *http.Request, threadID string) {

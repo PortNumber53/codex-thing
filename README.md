@@ -26,6 +26,9 @@ only to the Go bridge; the underlying Codex app-server stays on loopback.
 - Select a workspace for a new conversation with server-backed path completion.
 - Serve the production React application directly from the Go binary's HTTP
   server.
+- Use the native Flutter client in [`mobile/`](mobile/) to swipe horizontally
+  between full-screen sessions across workspaces while keeping an Android-safe
+  composer fixed at the bottom.
 
 ## Architecture
 
