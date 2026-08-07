@@ -13,8 +13,8 @@ The production installation has three runtime pieces:
    `ws://127.0.0.1:40002`.
 3. A shell function named `codex` that adds `--remote
    ws://127.0.0.1:40002` to interactive Codex commands. Administrative commands
-   such as `codex login`, `codex app-server`, and `codex exec` continue to use the
-   normal local CLI path.
+   such as `codex login`, `codex auth`, `codex app-server`, and `codex exec`
+   continue to use the normal local CLI path.
 
 Vite is a build dependency, not a second production daemon. The installer runs
 `vite build`, and the Go process serves the resulting static UI on port `40001`.
@@ -87,17 +87,23 @@ go version
 codex --version
 ```
 
-The service runs as the user who executes the installer. Authenticate Codex as
-that same user:
+The service runs as the user who executes the installer. Prefer authenticating
+Codex as that same user before installation:
 
 ```bash
 codex login status || codex login --device-auth
 codex login status
 ```
 
-The second command must succeed before installation. On a headless server,
-device authentication is preferred. If device authentication is unavailable,
-copy only `~/.codex/auth.json` from an already authenticated trusted machine:
+On a headless server, device authentication is preferred. If authentication is
+not completed beforehand, installation can continue: after the service starts,
+the Web UI detects that Codex requires authentication and displays the OpenAI
+device sign-in URL and one-time code. Open that URL on any trusted browser,
+sign in, and paste the displayed code. All connected Web UI sessions update when
+the app-server confirms the login.
+
+If device authentication is unavailable, copy only `~/.codex/auth.json` from an
+already authenticated trusted machine:
 
 ```bash
 ssh SERVER 'mkdir -p ~/.codex && chmod 700 ~/.codex'
@@ -109,11 +115,13 @@ Treat `auth.json` like a password. Do not commit it, log it, or copy the entire
 `.codex` directory.
 
 `codex login status` verifies that stored credentials exist, but some CLI
-versions can still report success after a refresh token expires. After starting
-the service, inspect its logs. If they contain `token_expired` or
-`refresh_token_expired`, run `codex logout` followed by `codex login
---device-auth` as the service user, or replace `auth.json` using the secure copy
-procedure above, then restart the service.
+versions can still report success after a refresh token expires. The Go bridge
+asks app-server to refresh managed credentials during startup. If the refresh
+fails, the Web UI automatically switches to the device sign-in screen; no
+service restart is required after completing that flow. If device sign-in is
+disabled for the account or workspace, run `codex logout` followed by `codex
+login --device-auth` as the service user, or replace `auth.json` using the secure
+copy procedure above.
 
 ## Generic one-host installation
 
@@ -147,6 +155,10 @@ exec "$SHELL" -l
 
 Existing shells retain their old function definitions until restarted. Tell the
 human operator about this step even when an AI agent performed the installation.
+The updated wrapper also signals the Go bridge after successful `codex login`,
+`codex logout`, `codex auth login`, or `codex auth logout` commands. This keeps
+the shared app-server and all Web UI sessions synchronized even when credentials
+use the operating-system keyring.
 
 Verify the service from the host:
 
@@ -228,7 +240,11 @@ for a process that uses that user's Codex authentication.
 
 After restarting a shell on the server, plain `codex` uses the shared local
 app-server because of the installed wrapper. `codex resume SESSION_ID` and the
-interactive session picker do as well.
+interactive session picker do as well. Administrative `codex login`, `codex
+logout`, and the newer `codex auth ...` command family still run through the
+local CLI. Login and logout actions then notify the bridge of the credential
+change. The bridge also watches the file-backed Codex auth cache for changes
+made outside a wrapped shell.
 
 To connect a terminal UI from a different computer, tunnel the app-server rather
 than exposing it. This example maps client port `41002` to port `40002` on the
@@ -332,7 +348,8 @@ An installation agent should run these checks in order:
 
 1. `node --version`, `npm --version`, `go version`, and `codex --version` satisfy
    the versions above.
-2. `codex login status` succeeds as the service user.
+2. Either `codex login status` succeeds as the service user, or the running Web
+   UI presents a device sign-in URL and code that can be completed successfully.
 3. `config.env` contains the expected absolute paths and loopback app-server URL.
 4. `systemctl --user status codex-thing.service` or `launchctl print
    "gui/$UID/com.codex-thing.web"` reports a running process.

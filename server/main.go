@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/fsnotify/fsnotify"
 )
 
 type rpcError struct {
@@ -106,6 +107,28 @@ type runtimeSnapshot struct {
 	Approvals   []commandApproval `json:"approvals"`
 }
 
+type authSnapshot struct {
+	Type               string `json:"type"`
+	Status             string `json:"status"`
+	RequiresOpenAIAuth bool   `json:"requiresOpenaiAuth"`
+	AuthMode           string `json:"authMode,omitempty"`
+	PlanType           string `json:"planType,omitempty"`
+	LoginID            string `json:"loginId,omitempty"`
+	VerificationURL    string `json:"verificationUrl,omitempty"`
+	UserCode           string `json:"userCode,omitempty"`
+	Message            string `json:"message,omitempty"`
+}
+
+type accountInfo struct {
+	Type     string `json:"type"`
+	PlanType string `json:"planType,omitempty"`
+}
+
+type accountReadResult struct {
+	Account            *accountInfo `json:"account"`
+	RequiresOpenAIAuth bool         `json:"requiresOpenaiAuth"`
+}
+
 type socketHub struct {
 	mu      sync.RWMutex
 	clients map[chan []byte]struct{}
@@ -161,10 +184,15 @@ type Codex struct {
 	stateMu   sync.RWMutex
 	active    map[string]activeTurn
 	approvals map[string]pendingApproval
+	authMu    sync.RWMutex
+	auth      authSnapshot
 	hub       *socketHub
 	nextID    atomic.Int64
 	nextUIID  atomic.Int64
 	ready     atomic.Bool
+	authCheck atomic.Bool
+	authLogin atomic.Bool
+	authSync  atomic.Bool
 	done      chan struct{}
 	closeOnce sync.Once
 }
@@ -183,6 +211,7 @@ func startCodex(bin, endpoint string) (*Codex, error) {
 			c.conn.CloseNow()
 			return nil, fmt.Errorf("initialize existing codex app-server: %w", err)
 		}
+		go c.watchAuthChanges(bin)
 		log.Printf("connected to existing Codex app-server at %s", endpoint)
 		return c, nil
 	}
@@ -238,6 +267,7 @@ func startCodex(bin, endpoint string) (*Codex, error) {
 		_ = cmd.Process.Kill()
 		return nil, fmt.Errorf("initialize codex: %w", err)
 	}
+	go c.watchAuthChanges(bin)
 	log.Printf("started shared Codex app-server at %s", endpoint)
 	return c, nil
 }
@@ -252,6 +282,7 @@ func newCodex(conn *websocket.Conn, endpoint string) *Codex {
 		rich:      make(map[string]map[string][]historyMessage),
 		active:    make(map[string]activeTurn),
 		approvals: make(map[string]pendingApproval),
+		auth:      authSnapshot{Type: "auth/snapshot", Status: "checking"},
 		hub:       newSocketHub(),
 		done:      make(chan struct{}),
 	}
@@ -271,6 +302,7 @@ func (c *Codex) initialize() error {
 		return err
 	}
 	c.ready.Store(true)
+	go c.refreshAuth(true)
 	return nil
 }
 
@@ -318,6 +350,9 @@ func (c *Codex) call(ctx context.Context, method string, params any, out any) er
 	select {
 	case got := <-response:
 		if got.err != nil {
+			if !strings.HasPrefix(method, "account/") && isAuthError(got.err) {
+				go c.refreshAuth(true)
+			}
 			return got.err
 		}
 		if out != nil && len(got.result) > 0 {
@@ -336,6 +371,330 @@ func (c *Codex) removePending(key string) {
 	c.pendingMu.Lock()
 	delete(c.pending, key)
 	c.pendingMu.Unlock()
+}
+
+func authStateFromAccount(result accountReadResult) authSnapshot {
+	state := authSnapshot{
+		Type:               "auth/snapshot",
+		Status:             "authenticated",
+		RequiresOpenAIAuth: result.RequiresOpenAIAuth,
+	}
+	if result.Account != nil {
+		state.AuthMode = result.Account.Type
+		state.PlanType = result.Account.PlanType
+		return state
+	}
+	if result.RequiresOpenAIAuth {
+		state.Status = "required"
+		state.Message = "Sign in to OpenAI to continue using Codex."
+	}
+	return state
+}
+
+func (c *Codex) authState() authSnapshot {
+	c.authMu.RLock()
+	state := c.auth
+	c.authMu.RUnlock()
+	if state.Type == "" {
+		state.Type = "auth/snapshot"
+	}
+	if state.Status == "" {
+		state.Status = "checking"
+	}
+	return state
+}
+
+func (c *Codex) setAuthState(state authSnapshot) {
+	state.Type = "auth/snapshot"
+	c.authMu.Lock()
+	changed := c.auth != state
+	c.auth = state
+	c.authMu.Unlock()
+	if changed && c.hub != nil {
+		c.hub.broadcast(state)
+	}
+}
+
+func (c *Codex) refreshAuth(refreshToken bool) {
+	if !c.authCheck.CompareAndSwap(false, true) {
+		return
+	}
+	defer c.authCheck.Store(false)
+
+	current := c.authState()
+	// Auth failures can keep arriving from work that was already in flight when
+	// device login began. Keep the issued code stable until app-server reports
+	// account/login/completed; that notification will move the state out of
+	// pending before asking us to verify the new account.
+	if current.Status == "pending" || current.Status == "starting" || current.Status == "syncing" || current.Status == "completing" || current.Status == "error" {
+		return
+	}
+	current.Status = "checking"
+	current.Message = ""
+	c.setAuthState(current)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	var result accountReadResult
+	err := c.call(ctx, "account/read", map[string]bool{"refreshToken": refreshToken}, &result)
+	cancel()
+	if err != nil {
+		if isAuthError(err) {
+			c.setAuthState(authSnapshot{
+				Status:             "required",
+				RequiresOpenAIAuth: true,
+				Message:            "Your Codex login is missing or expired.",
+			})
+			if loginErr := c.startDeviceLogin(context.Background()); loginErr != nil {
+				log.Printf("start Codex device login after auth failure: %v", loginErr)
+			}
+			return
+		}
+		current = c.authState()
+		current.Status = "error"
+		current.Message = "Could not check Codex authentication: " + err.Error()
+		c.setAuthState(current)
+		return
+	}
+
+	state := authStateFromAccount(result)
+	c.setAuthState(state)
+	if state.Status == "required" {
+		if err := c.startDeviceLogin(context.Background()); err != nil {
+			log.Printf("start Codex device login: %v", err)
+		}
+	}
+}
+
+func (c *Codex) confirmCompletedLogin() {
+	timer := time.NewTimer(2 * time.Second)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+	case <-c.done:
+		return
+	}
+
+	if c.authState().Status != "completing" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	var result accountReadResult
+	err := c.call(ctx, "account/read", map[string]bool{"refreshToken": true}, &result)
+	cancel()
+	// account/updated may have confirmed the login while account/read was in
+	// flight. Never overwrite that authoritative notification.
+	if c.authState().Status != "completing" {
+		return
+	}
+	if err == nil {
+		state := authStateFromAccount(result)
+		if state.Status == "authenticated" {
+			c.setAuthState(state)
+			return
+		}
+	}
+
+	message := "Sign-in finished, but Codex did not confirm the account. Request a new code and try again."
+	if err != nil {
+		message = "Sign-in finished, but Codex could not confirm the account: " + err.Error()
+	}
+	c.setAuthState(authSnapshot{
+		Status:             "error",
+		RequiresOpenAIAuth: true,
+		Message:            message,
+	})
+}
+
+func (c *Codex) startDeviceLogin(parent context.Context) error {
+	current := c.authState()
+	if current.Status == "authenticated" || current.Status == "pending" || current.Status == "starting" {
+		return nil
+	}
+	if !c.authLogin.CompareAndSwap(false, true) {
+		return nil
+	}
+	defer c.authLogin.Store(false)
+	c.setAuthState(authSnapshot{
+		Status:             "starting",
+		RequiresOpenAIAuth: true,
+		Message:            "Requesting a one-time OpenAI sign-in code…",
+	})
+
+	ctx, cancel := context.WithTimeout(parent, 20*time.Second)
+	defer cancel()
+	var result struct {
+		Type            string `json:"type"`
+		LoginID         string `json:"loginId"`
+		VerificationURL string `json:"verificationUrl"`
+		UserCode        string `json:"userCode"`
+	}
+	if err := c.call(ctx, "account/login/start", map[string]string{"type": "chatgptDeviceCode"}, &result); err != nil {
+		c.setAuthState(authSnapshot{
+			Status:             "error",
+			RequiresOpenAIAuth: true,
+			Message:            "Could not start OpenAI device sign-in: " + err.Error(),
+		})
+		return err
+	}
+	if result.LoginID == "" || result.VerificationURL == "" || result.UserCode == "" {
+		err := errors.New("Codex returned an incomplete device sign-in response")
+		c.setAuthState(authSnapshot{Status: "error", RequiresOpenAIAuth: true, Message: err.Error()})
+		return err
+	}
+	c.setAuthState(authSnapshot{
+		Status:             "pending",
+		RequiresOpenAIAuth: true,
+		LoginID:            result.LoginID,
+		VerificationURL:    result.VerificationURL,
+		UserCode:           result.UserCode,
+		Message:            "Open the OpenAI sign-in page and enter the one-time code.",
+	})
+	return nil
+}
+
+func codexAuthPath() (string, error) {
+	codexHome := strings.TrimSpace(os.Getenv("CODEX_HOME"))
+	if codexHome == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		codexHome = filepath.Join(home, ".codex")
+	}
+	if !filepath.IsAbs(codexHome) {
+		return "", errors.New("CODEX_HOME must be an absolute path")
+	}
+	return filepath.Join(filepath.Clean(codexHome), "auth.json"), nil
+}
+
+func (c *Codex) watchAuthChanges(bin string) {
+	authPath, err := codexAuthPath()
+	if err != nil {
+		log.Printf("Codex auth watcher disabled: %v", err)
+		return
+	}
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		log.Printf("Codex auth watcher disabled: %v", err)
+		return
+	}
+	defer watcher.Close()
+	if err := watcher.Add(filepath.Dir(authPath)); err != nil {
+		log.Printf("Codex auth watcher could not watch %s: %v", filepath.Dir(authPath), err)
+		return
+	}
+	authSignalPath := filepath.Join(filepath.Dir(authPath), ".auth-changed")
+
+	var timer *time.Timer
+	schedule := func(delay time.Duration) {
+		if timer != nil {
+			timer.Stop()
+		}
+		timer = time.AfterFunc(delay, func() { c.syncExternalAuth(bin) })
+	}
+	// Reconcile once after initialization so a logout that occurred while the
+	// bridge was stopped is still reflected by a reused app-server process.
+	schedule(750 * time.Millisecond)
+
+	for {
+		select {
+		case <-c.done:
+			if timer != nil {
+				timer.Stop()
+			}
+			return
+		case event, ok := <-watcher.Events:
+			if !ok {
+				return
+			}
+			changedPath := filepath.Clean(event.Name)
+			if (changedPath == authPath || changedPath == authSignalPath) && event.Op&(fsnotify.Create|fsnotify.Write|fsnotify.Remove|fsnotify.Rename|fsnotify.Chmod) != 0 {
+				schedule(200 * time.Millisecond)
+			}
+		case watchErr, ok := <-watcher.Errors:
+			if !ok {
+				return
+			}
+			log.Printf("Codex auth watcher: %v", watchErr)
+		}
+	}
+}
+
+func (c *Codex) syncExternalAuth(bin string) {
+	if !c.ready.Load() || !c.authSync.CompareAndSwap(false, true) {
+		return
+	}
+	defer c.authSync.Store(false)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	output, err := exec.CommandContext(ctx, bin, "login", "status").CombinedOutput()
+	cancel()
+	if err == nil {
+		state := c.authState()
+		if state.Status == "required" || state.Status == "error" {
+			state.Status = "checking"
+			state.Message = "Detected a Codex login from another process. Confirming the shared account…"
+			c.setAuthState(state)
+			go c.refreshAuth(true)
+		}
+		return
+	}
+	if !strings.Contains(strings.ToLower(string(output)), "not logged in") {
+		log.Printf("could not verify external Codex auth state: %v", err)
+		return
+	}
+
+	state := c.authState()
+	if state.Status == "required" || state.Status == "pending" || state.Status == "starting" || state.Status == "syncing" || state.Status == "completing" || state.Status == "error" {
+		return
+	}
+	c.setAuthState(authSnapshot{
+		Status:             "syncing",
+		RequiresOpenAIAuth: true,
+		Message:            "Codex logout detected. Synchronizing the shared app-server…",
+	})
+
+	logoutCtx, logoutCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	err = c.call(logoutCtx, "account/logout", map[string]any{}, nil)
+	logoutCancel()
+	if err != nil {
+		c.setAuthState(authSnapshot{
+			Status:             "error",
+			RequiresOpenAIAuth: true,
+			Message:            "Detected a Codex logout but could not synchronize app-server: " + err.Error(),
+		})
+		return
+	}
+	c.setAuthState(authSnapshot{
+		Status:             "required",
+		RequiresOpenAIAuth: true,
+		Message:            "Codex was logged out from another process.",
+	})
+	if err := c.startDeviceLogin(context.Background()); err != nil {
+		log.Printf("start Codex device login after external logout: %v", err)
+	}
+}
+
+func isAuthError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	markers := []string{
+		"401",
+		"unauthorized",
+		"authentication required",
+		"not logged in",
+		"refresh_token_expired",
+		"refresh token expired",
+		"login required",
+	}
+	for _, marker := range markers {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Codex) readLoop() {
@@ -850,6 +1209,68 @@ func (c *Codex) handleNotification(method string, raw json.RawMessage) {
 		c.resolveApprovalFromNotification(raw)
 		return
 	}
+	switch method {
+	case "account/updated":
+		var params struct {
+			AuthMode *string `json:"authMode"`
+			PlanType *string `json:"planType"`
+		}
+		if json.Unmarshal(raw, &params) == nil && params.AuthMode != nil && *params.AuthMode != "" {
+			planType := ""
+			if params.PlanType != nil {
+				planType = *params.PlanType
+			}
+			c.setAuthState(authSnapshot{
+				Status:             "authenticated",
+				RequiresOpenAIAuth: *params.AuthMode != "bedrockApiKey",
+				AuthMode:           *params.AuthMode,
+				PlanType:           planType,
+			})
+		} else {
+			go c.refreshAuth(false)
+		}
+	case "account/login/completed":
+		var params struct {
+			LoginID *string `json:"loginId"`
+			Success bool    `json:"success"`
+			Error   *string `json:"error"`
+		}
+		if json.Unmarshal(raw, &params) == nil {
+			current := c.authState()
+			if params.LoginID != nil && current.LoginID != "" && *params.LoginID != current.LoginID {
+				break
+			}
+			// Notifications can be duplicated or arrive after account/updated.
+			// Neither a late success nor a late failure may regress a confirmed
+			// account or restart completion confirmation.
+			if current.Status == "authenticated" || current.Status == "completing" {
+				break
+			}
+			if params.Success {
+				current.Status = "completing"
+				current.Message = "Sign-in completed. Waiting for Codex account confirmation…"
+				current.VerificationURL = ""
+				current.UserCode = ""
+				c.setAuthState(current)
+				go c.confirmCompletedLogin()
+			} else {
+				message := "OpenAI sign-in did not complete. Request a new code and try again."
+				if params.Error != nil && strings.TrimSpace(*params.Error) != "" {
+					message = *params.Error
+				}
+				c.setAuthState(authSnapshot{Status: "error", RequiresOpenAIAuth: true, Message: message})
+			}
+		}
+	case "error":
+		var params struct {
+			Error struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if json.Unmarshal(raw, &params) == nil && isAuthError(errors.New(params.Error.Message)) {
+			go c.refreshAuth(true)
+		}
+	}
 	var base struct {
 		ThreadID string `json:"threadId"`
 		TurnID   string `json:"turnId"`
@@ -1204,7 +1625,29 @@ func (s *server) health(w http.ResponseWriter, _ *http.Request) {
 	if s.codex.ready.Load() {
 		state = "ready"
 	}
-	_ = json.NewEncoder(w).Encode(map[string]string{"codex": state, "workspace": s.workspace, "appServer": s.codex.endpoint})
+	_ = json.NewEncoder(w).Encode(map[string]any{"codex": state, "workspace": s.workspace, "appServer": s.codex.endpoint, "auth": s.codex.authState()})
+}
+
+func (s *server) auth(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	switch r.Method {
+	case http.MethodGet:
+		_ = json.NewEncoder(w).Encode(s.codex.authState())
+	case http.MethodPost:
+		if !s.codex.ready.Load() {
+			http.Error(w, "codex app-server is unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		err := s.codex.startDeviceLogin(r.Context())
+		if err != nil {
+			w.WriteHeader(http.StatusBadGateway)
+		}
+		_ = json.NewEncoder(w).Encode(s.codex.authState())
+	default:
+		w.Header().Set("Allow", "GET, POST")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 func (s *server) completeWorkspaces(w http.ResponseWriter, r *http.Request) {
@@ -1264,6 +1707,11 @@ func (s *server) websocket(w http.ResponseWriter, r *http.Request) {
 	connected, _ := json.Marshal(map[string]string{"type": "connected"})
 	select {
 	case events <- connected:
+	default:
+	}
+	auth, _ := json.Marshal(s.codex.authState())
+	select {
+	case events <- auth:
 	default:
 	}
 	for {
@@ -1839,6 +2287,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/health", s.health)
+	mux.HandleFunc("/api/auth", s.auth)
 	mux.HandleFunc("/api/workspaces/complete", s.completeWorkspaces)
 	mux.HandleFunc("/api/ws", s.websocket)
 	mux.HandleFunc("/api/threads", s.threads)

@@ -20,6 +20,9 @@ only to the Go bridge; the underlying Codex app-server stays on loopback.
   elicitations, and model questions from the browser or terminal.
 - Retain active-turn and pending-approval state after a browser refresh, including
   the ability to interrupt a running turn.
+- Detect missing, expired, or externally cleared Codex authentication and
+  present the OpenAI device sign-in URL and one-time code directly in every
+  connected browser.
 - Select a workspace for a new conversation with server-backed path completion.
 - Serve the production React application directly from the Go binary's HTTP
   server.
@@ -50,6 +53,8 @@ thread projection, preserving the order users see while a turn is running.
 All clients must connect to the same app-server process to share live state.
 Browser clients do this through the Go bridge. Terminal clients do it through
 Codex's `--remote` option or the shell wrapper installed by this project.
+The wrapper leaves both legacy `codex login`/`logout` commands and the newer
+`codex auth ...` command family on the local administrative CLI path.
 
 Resuming the same stored thread with a standalone Codex process does not attach
 that process to the shared runtime. It creates a separate live session and will

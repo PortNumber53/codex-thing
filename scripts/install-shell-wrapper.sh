@@ -96,7 +96,21 @@ $begin_marker
 codex() {
   local codex_subcommand="\${1:-}"
   case "\$codex_subcommand" in
-    exec|review|login|logout|mcp|plugin|mcp-server|app-server|remote-control|app|completion|update|doctor|sandbox|debug|apply|cloud|exec-server|features|help)
+    login|logout|auth)
+      local codex_auth_action="\$codex_subcommand"
+      if [[ "\$codex_subcommand" == "auth" ]]; then
+        codex_auth_action="\${2:-}"
+      fi
+      command codex "\$@"
+      local codex_auth_status=\$?
+      if [[ \$codex_auth_status -eq 0 && ( "\$codex_auth_action" == "login" || "\$codex_auth_action" == "logout" ) ]]; then
+        local codex_auth_home="\${CODEX_HOME:-\$HOME/.codex}"
+        mkdir -p "\$codex_auth_home" 2>/dev/null || true
+        touch "\$codex_auth_home/.auth-changed" 2>/dev/null || true
+      fi
+      return "\$codex_auth_status"
+      ;;
+    exec|review|mcp|plugin|mcp-server|app-server|remote-control|app|completion|update|doctor|sandbox|debug|apply|cloud|exec-server|features|help)
       command codex "\$@"
       ;;
     *)
@@ -118,7 +132,23 @@ install_fish_wrapper() {
 function codex
     set -l codex_subcommand \$argv[1]
     switch \$codex_subcommand
-        case exec review login logout mcp plugin mcp-server app-server remote-control app completion update doctor sandbox debug apply cloud exec-server features help
+        case login logout auth
+            set -l codex_auth_action \$codex_subcommand
+            if test "\$codex_subcommand" = auth
+                set codex_auth_action \$argv[2]
+            end
+            command codex \$argv
+            set -l codex_auth_status \$status
+            if test \$codex_auth_status -eq 0; and contains -- "\$codex_auth_action" login logout
+                set -l codex_auth_home \$CODEX_HOME
+                if test -z "\$codex_auth_home"
+                    set codex_auth_home \$HOME/.codex
+                end
+                mkdir -p "\$codex_auth_home" 2>/dev/null; or true
+                touch "\$codex_auth_home/.auth-changed" 2>/dev/null; or true
+            end
+            return \$codex_auth_status
+        case exec review mcp plugin mcp-server app-server remote-control app completion update doctor sandbox debug apply cloud exec-server features help
             command codex \$argv
         case '*'
             command codex --remote '$endpoint' \$argv

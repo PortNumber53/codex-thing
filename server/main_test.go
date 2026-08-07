@@ -37,6 +37,14 @@ func TestWebsocketBroadcastsCodexNotifications(t *testing.T) {
 	if err := json.Unmarshal(connected, &initial); err != nil || initial["type"] != "connected" {
 		t.Fatalf("unexpected initial event: %s (%v)", connected, err)
 	}
+	_, authPayload, err := conn.Read(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var auth authSnapshot
+	if err := json.Unmarshal(authPayload, &auth); err != nil || auth.Type != "auth/snapshot" || auth.Status != "checking" {
+		t.Fatalf("unexpected initial auth state: %s (%v)", authPayload, err)
+	}
 
 	codex.hub.broadcast(map[string]any{
 		"type":   "notification",
@@ -60,6 +68,233 @@ func TestWebsocketBroadcastsCodexNotifications(t *testing.T) {
 	}
 	if event.Type != "notification" || event.Method != "item/agentMessage/delta" || event.Params.ThreadID != "thread-1" || event.Params.Delta != "hello" {
 		t.Fatalf("unexpected broadcast: %+v", event)
+	}
+}
+
+func TestAuthStateFromAccount(t *testing.T) {
+	loggedOut := authStateFromAccount(accountReadResult{RequiresOpenAIAuth: true})
+	if loggedOut.Status != "required" || !loggedOut.RequiresOpenAIAuth || loggedOut.UserCode != "" {
+		t.Fatalf("unexpected logged-out state: %#v", loggedOut)
+	}
+
+	loggedIn := authStateFromAccount(accountReadResult{
+		RequiresOpenAIAuth: true,
+		Account:            &accountInfo{Type: "chatgpt", PlanType: "pro"},
+	})
+	if loggedIn.Status != "authenticated" || loggedIn.AuthMode != "chatgpt" || loggedIn.PlanType != "pro" {
+		t.Fatalf("unexpected logged-in state: %#v", loggedIn)
+	}
+
+	localProvider := authStateFromAccount(accountReadResult{RequiresOpenAIAuth: false})
+	if localProvider.Status != "authenticated" || localProvider.RequiresOpenAIAuth {
+		t.Fatalf("unexpected no-auth provider state: %#v", localProvider)
+	}
+}
+
+func TestRefreshAuthStartsDeviceLoginWhenRequired(t *testing.T) {
+	httpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.CloseNow()
+		for range 2 {
+			_, payload, readErr := conn.Read(r.Context())
+			if readErr != nil {
+				return
+			}
+			var request envelope
+			if json.Unmarshal(payload, &request) != nil {
+				return
+			}
+			var result any
+			switch request.Method {
+			case "account/read":
+				result = map[string]any{"account": nil, "requiresOpenaiAuth": true}
+			case "account/login/start":
+				var params map[string]string
+				_ = json.Unmarshal(request.Params, &params)
+				if params["type"] != "chatgptDeviceCode" {
+					return
+				}
+				result = map[string]string{
+					"type":            "chatgptDeviceCode",
+					"loginId":         "login-1",
+					"verificationUrl": "https://auth.openai.com/codex/device",
+					"userCode":        "ABCD-1234",
+				}
+			default:
+				return
+			}
+			response, _ := json.Marshal(map[string]any{"id": json.RawMessage(request.ID), "result": result})
+			if conn.Write(r.Context(), websocket.MessageText, response) != nil {
+				return
+			}
+		}
+	}))
+	defer httpServer.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(httpServer.URL, "http"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+	codex := newCodex(conn, "ws://codex.test")
+	go codex.readLoop()
+
+	codex.refreshAuth(false)
+	state := codex.authState()
+	if state.Status != "pending" || state.LoginID != "login-1" || state.VerificationURL != "https://auth.openai.com/codex/device" || state.UserCode != "ABCD-1234" {
+		t.Fatalf("device login was not exposed: %#v", state)
+	}
+}
+
+func TestRefreshAuthDoesNotRestartDeviceLoginInProtectedStates(t *testing.T) {
+	for _, status := range []string{"pending", "starting", "syncing", "completing", "error"} {
+		t.Run(status, func(t *testing.T) {
+			codex := newCodex(nil, "ws://codex.test")
+			codex.setAuthState(authSnapshot{
+				Status:             status,
+				RequiresOpenAIAuth: true,
+				LoginID:            "login-1",
+				VerificationURL:    "https://auth.openai.com/codex/device",
+				UserCode:           "ABCD-1234",
+			})
+
+			codex.refreshAuth(true)
+			state := codex.authState()
+			if state.Status != status || state.LoginID != "login-1" || state.UserCode != "ABCD-1234" {
+				t.Fatalf("%s device login state was replaced: %#v", status, state)
+			}
+		})
+	}
+}
+
+func TestLoginCompletionWaitsForAccountUpdatedWithoutReplacingCode(t *testing.T) {
+	codex := newCodex(nil, "ws://codex.test")
+	codex.setAuthState(authSnapshot{
+		Status:             "pending",
+		RequiresOpenAIAuth: true,
+		LoginID:            "login-1",
+		VerificationURL:    "https://auth.openai.com/codex/device",
+		UserCode:           "ABCD-1234",
+	})
+
+	codex.handleNotification("account/login/completed", json.RawMessage(`{"loginId":"login-1","success":true}`))
+	state := codex.authState()
+	if state.Status != "completing" || state.LoginID != "login-1" || state.UserCode != "" {
+		t.Fatalf("successful device login was not held for confirmation: %#v", state)
+	}
+	close(codex.done)
+
+	codex.handleNotification("account/updated", json.RawMessage(`{"authMode":"chatgpt","planType":"pro"}`))
+	state = codex.authState()
+	if state.Status != "authenticated" || state.AuthMode != "chatgpt" || state.PlanType != "pro" {
+		t.Fatalf("account update did not confirm login: %#v", state)
+	}
+}
+
+func TestLoginCompletionIgnoresMismatchedLoginID(t *testing.T) {
+	codex := newCodex(nil, "ws://codex.test")
+	codex.setAuthState(authSnapshot{
+		Status:             "pending",
+		RequiresOpenAIAuth: true,
+		LoginID:            "current-login",
+		VerificationURL:    "https://auth.openai.com/codex/device",
+		UserCode:           "CURRENT-CODE",
+	})
+
+	codex.handleNotification("account/login/completed", json.RawMessage(`{"loginId":"stale-login","success":true}`))
+	state := codex.authState()
+	if state.Status != "pending" || state.LoginID != "current-login" || state.UserCode != "CURRENT-CODE" {
+		t.Fatalf("stale login completion replaced the current code: %#v", state)
+	}
+}
+
+func TestAuthWatcherSynchronizesExternalLogout(t *testing.T) {
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	authPath := filepath.Join(codexHome, "auth.json")
+	if err := os.WriteFile(authPath, []byte(`{"tokens":"test"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	statusBin := filepath.Join(t.TempDir(), "codex-status")
+	statusScript := "#!/bin/sh\nif [ -f \"$CODEX_HOME/auth.json\" ]; then echo 'Logged in using ChatGPT'; exit 0; fi\necho 'Not logged in'; exit 1\n"
+	if err := os.WriteFile(statusBin, []byte(statusScript), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	httpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.CloseNow()
+		for {
+			_, payload, readErr := conn.Read(r.Context())
+			if readErr != nil {
+				return
+			}
+			var request envelope
+			if json.Unmarshal(payload, &request) != nil {
+				return
+			}
+			var result any
+			switch request.Method {
+			case "account/logout":
+				result = map[string]any{}
+			case "account/login/start":
+				result = map[string]string{
+					"type":            "chatgptDeviceCode",
+					"loginId":         "login-after-logout",
+					"verificationUrl": "https://auth.openai.com/codex/device",
+					"userCode":        "WXYZ-9876",
+				}
+			default:
+				return
+			}
+			response, _ := json.Marshal(map[string]any{"id": json.RawMessage(request.ID), "result": result})
+			if conn.Write(r.Context(), websocket.MessageText, response) != nil {
+				return
+			}
+		}
+	}))
+	defer httpServer.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(httpServer.URL, "http"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+	codex := newCodex(conn, "ws://codex.test")
+	codex.ready.Store(true)
+	codex.setAuthState(authSnapshot{Status: "authenticated", RequiresOpenAIAuth: true, AuthMode: "chatgpt"})
+	go codex.readLoop()
+	go codex.watchAuthChanges(statusBin)
+
+	// Let the watcher's initial reconciliation observe the existing login, then
+	// remove the cache exactly as an external `codex logout` process does.
+	time.Sleep(time.Second)
+	if err := os.Remove(authPath); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		state := codex.authState()
+		if state.Status == "pending" {
+			if state.LoginID != "login-after-logout" || state.UserCode != "WXYZ-9876" {
+				t.Fatalf("unexpected device login after logout: %#v", state)
+			}
+			break
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("auth watcher did not detect logout; final state: %#v", state)
+		case <-time.After(25 * time.Millisecond):
+		}
 	}
 }
 

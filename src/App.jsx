@@ -212,6 +212,85 @@ function EmptyState({ onPrompt }) {
   </div>
 }
 
+function AuthPrompt({ auth, onRetry }) {
+  const [copyStatus, setCopyStatus] = useState('idle')
+  const codeRef = useRef(null)
+  const copyResetRef = useRef(null)
+  const pending = auth.status === 'pending' && auth.verificationUrl && auth.userCode
+  const busy = auth.status === 'checking' || auth.status === 'starting' || auth.status === 'syncing' || auth.status === 'completing'
+
+  useEffect(() => {
+    clearTimeout(copyResetRef.current)
+    setCopyStatus('idle')
+  }, [auth.userCode])
+  useEffect(() => () => clearTimeout(copyResetRef.current), [])
+
+  const showCopyStatus = status => {
+    clearTimeout(copyResetRef.current)
+    setCopyStatus(status)
+    copyResetRef.current = setTimeout(() => setCopyStatus('idle'), 1600)
+  }
+  const selectVisibleCode = () => {
+    if (!codeRef.current) return
+    const range = document.createRange()
+    range.selectNodeContents(codeRef.current)
+    const selection = window.getSelection()
+    if (!selection) return
+    selection.removeAllRanges()
+    selection.addRange(range)
+  }
+  const copyWithSelection = () => {
+    const activeElement = document.activeElement
+    const textarea = document.createElement('textarea')
+    textarea.value = auth.userCode
+    textarea.setAttribute('readonly', '')
+    textarea.style.position = 'fixed'
+    textarea.style.inset = '0 auto auto -9999px'
+    textarea.style.opacity = '0'
+    document.body.appendChild(textarea)
+    textarea.focus()
+    textarea.select()
+    textarea.setSelectionRange(0, textarea.value.length)
+    let succeeded = false
+    try {
+      succeeded = document.execCommand('copy')
+    } catch { /* fall through to selecting the visible code */ }
+    textarea.remove()
+    try { activeElement?.focus({ preventScroll: true }) } catch { /* focus restoration is best-effort */ }
+    if (succeeded) showCopyStatus('copied')
+    else {
+      selectVisibleCode()
+      showCopyStatus('selected')
+    }
+  }
+  const copyCode = () => {
+    if (window.isSecureContext && navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(auth.userCode).then(() => showCopyStatus('copied')).catch(copyWithSelection)
+    } else {
+      copyWithSelection()
+    }
+  }
+
+  return <div className="auth-state">
+    <section className="auth-card" role="alert" aria-live="polite">
+      <div className="auth-mark"><Icon name="terminal" size={24} /></div>
+      <p className="eyebrow">OPENAI AUTHENTICATION</p>
+      <h1>{pending ? 'Sign in to continue' : busy ? 'Checking your Codex login…' : 'Codex needs you to sign in'}</h1>
+      {pending ? <>
+        <p className="auth-intro">Open the OpenAI sign-in page in your browser. After signing in, paste this one-time code when prompted.</p>
+        <a className="auth-open" href={auth.verificationUrl} target="_blank" rel="noreferrer">Open OpenAI sign-in page</a>
+        <span className="auth-url">{auth.verificationUrl}</span>
+        <div className="auth-code"><code ref={codeRef}>{auth.userCode}</code><button type="button" onClick={copyCode}><Icon name={copyStatus === 'copied' ? 'check' : 'copy'} size={15} />{copyStatus === 'copied' ? 'Copied' : copyStatus === 'selected' ? 'Code selected' : 'Copy code'}</button></div>
+        <p className="auth-wait"><span className="spinner" />Waiting for sign-in to complete…</p>
+      </> : <>
+        <p className="auth-intro">{auth.message || 'The Codex app-server does not currently have a valid OpenAI login.'}</p>
+        {!busy && <button className="auth-open" type="button" onClick={onRetry}>Get a sign-in code</button>}
+        {busy && <p className="auth-wait"><span className="spinner" />Contacting the Codex app-server…</p>}
+      </>}
+    </section>
+  </div>
+}
+
 export default function App() {
   const [messages, setMessages] = useState([])
   const [input, setInput] = useState('')
@@ -219,6 +298,7 @@ export default function App() {
   const [turnId, setTurnId] = useState('')
   const [working, setWorking] = useState(false)
   const [status, setStatus] = useState('connecting')
+  const [auth, setAuth] = useState({ type: 'auth/snapshot', status: 'checking', requiresOpenaiAuth: true })
   const [activity, setActivity] = useState('')
   const [sidebar, setSidebar] = useState(true)
   const [threads, setThreads] = useState([])
@@ -293,6 +373,8 @@ export default function App() {
         const res = await fetch('/api/health')
         const data = await res.json()
         setStatus(data.codex === 'ready' ? 'ready' : 'offline')
+        if (data.auth?.type === 'auth/snapshot') setAuth(data.auth)
+        else if (data.codex === 'ready') setAuth({ type: 'auth/snapshot', status: 'authenticated', requiresOpenaiAuth: false })
         if (data.workspace) {
           defaultWorkspaceRef.current = data.workspace
           setDefaultWorkspace(data.workspace)
@@ -359,6 +441,10 @@ export default function App() {
   }
 
   const handleRealtimeEvent = (event, { allowWhileWorking = false } = {}) => {
+    if (event.type === 'auth/snapshot') {
+      setAuth(event)
+      return
+    }
     if (event.type === 'runtime/snapshot') {
       applyRuntimeSnapshot(event)
       return
@@ -583,6 +669,18 @@ export default function App() {
     socketRef.current.send(JSON.stringify({ type: 'approval/decide', approvalId, decision, ...payload }))
   }
 
+  const startDeviceLogin = async () => {
+    setAuth(current => ({ ...current, status: 'starting', message: 'Requesting a one-time OpenAI sign-in code…' }))
+    try {
+      const response = await fetch('/api/auth', { method: 'POST' })
+      const data = await response.json()
+      if (data?.type === 'auth/snapshot') setAuth(data)
+      else if (!response.ok) throw new Error(`HTTP ${response.status}`)
+    } catch (error) {
+      setAuth(current => ({ ...current, status: 'error', requiresOpenaiAuth: true, message: `Could not start sign-in: ${error.message}` }))
+    }
+  }
+
   const selectWorkspaceSuggestion = suggestion => {
     setWorkspaceInput(suggestion.path)
     setWorkspaceError('')
@@ -612,6 +710,10 @@ export default function App() {
   const keyDown = (event) => {
     if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); send() }
   }
+
+  const authBlocked = status === 'ready' && auth.status !== 'authenticated'
+  const displayStatus = status === 'ready' && authBlocked ? 'auth' : status
+  const statusLabel = status !== 'ready' ? (status === 'offline' ? 'Codex offline' : 'Connecting…') : authBlocked ? 'Sign in required' : 'Codex connected'
 
   return <div className={`app ${sidebar ? '' : 'sidebar-closed'}`}>
     <aside>
@@ -644,18 +746,18 @@ export default function App() {
         {!threads.length && <p>No saved sessions yet</p>}
       </div>
       <div className="aside-spacer" />
-      <div className="connection"><span className={`status-dot ${status}`} /><div><strong>{status === 'ready' ? 'Codex connected' : status === 'offline' ? 'Codex offline' : 'Connecting…'}</strong><small>App server · workspace write</small></div></div>
+      <div className="connection"><span className={`status-dot ${displayStatus}`} /><div><strong>{statusLabel}</strong><small>{authBlocked ? 'OpenAI authentication' : 'App server · workspace write'}</small></div></div>
     </aside>
 
     <main>
       <header>
         <button className="icon-button" onClick={() => setSidebar(v => !v)} aria-label="Toggle sidebar"><Icon name="panel" /></button>
         <div><strong>{messages.length ? 'Workspace conversation' : 'New conversation'}</strong><span>{threadId ? `Thread ${threadId.slice(0, 8)}` : 'Codex local'}</span></div>
-        <div className="header-badge"><span className={`status-dot ${status}`} />{status === 'ready' ? 'Connected' : 'Offline'}</div>
+        <div className="header-badge"><span className={`status-dot ${displayStatus}`} />{status === 'ready' ? (authBlocked ? 'Sign in required' : 'Connected') : 'Offline'}</div>
       </header>
 
       <section className="conversation">
-        {!messages.length ? <EmptyState onPrompt={send} /> : <div className="message-list">
+        {authBlocked ? <AuthPrompt auth={auth} onRetry={startDeviceLogin} /> : !messages.length ? <EmptyState onPrompt={send} /> : <div className="message-list">
           {messages.map((message, index) => <TranscriptItem item={message} index={index} isLast={index === messages.length - 1} key={message.id ? `${message.kind || message.role}-${message.id}` : index} />)}
           {activity && <div className="activity"><span className="spinner" />{activity}</div>}
           <div ref={endRef} />
@@ -668,8 +770,8 @@ export default function App() {
           {approvalError && <p className="approval-error">{approvalError}</p>}
         </div>}
         <div className={`composer ${working ? 'working' : ''}`}>
-          <textarea ref={textareaRef} value={input} onChange={e => setInput(e.target.value)} onKeyDown={keyDown} placeholder="Ask Codex to build, explain, or debug…" rows={1} disabled={working} />
-          <div className="composer-row"><span>↵ send &nbsp;·&nbsp; ⇧↵ new line</span>{working ? <button className="send stop" onClick={stop} aria-label="Stop"><Icon name="stop" size={16} /></button> : <button className="send" onClick={() => send()} disabled={!input.trim() || status !== 'ready'} aria-label="Send"><Icon name="send" size={17} /></button>}</div>
+          <textarea ref={textareaRef} value={input} onChange={e => setInput(e.target.value)} onKeyDown={keyDown} placeholder={authBlocked ? 'Sign in to OpenAI to chat with Codex' : 'Ask Codex to build, explain, or debug…'} rows={1} disabled={working || authBlocked} />
+          <div className="composer-row"><span>{authBlocked ? 'Authentication required' : '↵ send   ·   ⇧↵ new line'}</span>{working ? <button className="send stop" onClick={stop} aria-label="Stop"><Icon name="stop" size={16} /></button> : <button className="send" onClick={() => send()} disabled={!input.trim() || status !== 'ready' || authBlocked} aria-label="Send"><Icon name="send" size={17} /></button>}</div>
         </div>
         <p className="disclaimer">Codex can make mistakes. Review commands and file changes.</p>
       </footer>
