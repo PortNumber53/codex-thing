@@ -243,56 +243,63 @@ class _CodexHomeState extends State<CodexHome> {
         resizeToAvoidBottomInset: true,
         body: SafeArea(
           bottom: false,
-          child: switch (controller.connection) {
-            BridgeConnection.connecting => const ConnectionStateView(
-              title: 'Connecting to Codex…',
-              message: 'Looking for the shared app-server bridge.',
-              loading: true,
-            ),
-            BridgeConnection.offline => ConnectionStateView(
-              title: 'Codex is offline',
-              message: controller.connectionError.isEmpty
-                  ? 'The mobile app could not reach the Go bridge.'
-                  : controller.connectionError,
-              onRetry: controller.reconnect,
-              onSettings: _showSettings,
-            ),
-            BridgeConnection.ready when authBlocked => AuthView(
-              auth: controller.auth,
-              onRetry: controller.requestDeviceLogin,
-              onSettings: _showSettings,
-            ),
-            BridgeConnection.ready =>
-              controller.sessions.isEmpty
-                  ? ConnectionStateView(
-                      title: 'No conversations yet',
-                      message: 'Start a conversation in any workspace.',
-                      onRetry: _newConversation,
-                      retryLabel: 'New conversation',
-                      onSettings: _showSettings,
-                    )
-                  : PageView.builder(
-                      controller: _pages,
-                      physics: const PageScrollPhysics(),
-                      onPageChanged: _selectPage,
-                      itemCount: controller.sessions.length,
-                      itemBuilder: (context, index) => SessionPage(
-                        key: ValueKey(controller.sessions[index].localId),
-                        session: controller.sessions[index],
-                        index: index,
-                        count: controller.sessions.length,
-                        socketConnected: controller.socketConnected,
-                        onSessions: _showSessions,
-                        onSettings: _showSettings,
-                        onNew: _newConversation,
-                        onPrompt: (prompt) {
-                          _composer.text = prompt;
-                          _send();
-                        },
-                        onApproval: controller.decideApproval,
-                      ),
-                    ),
-          },
+          child: Column(
+            children: [
+              PersistentActionBar(
+                connection: controller.connection,
+                session: session,
+                socketConnected: controller.socketConnected,
+                authBlocked: authBlocked,
+                hasSessions: controller.sessions.isNotEmpty,
+                onSessions: _showSessions,
+                onNew: _newConversation,
+                onSettings: _showSettings,
+              ),
+              Expanded(
+                child: switch (controller.connection) {
+                  BridgeConnection.connecting => const ConnectionStateView(
+                    title: 'Connecting to Codex…',
+                    message: 'Looking for the shared app-server bridge.',
+                    loading: true,
+                  ),
+                  BridgeConnection.offline => ConnectionStateView(
+                    title: 'Codex is offline',
+                    message: controller.connectionError.isEmpty
+                        ? 'The mobile app could not reach the Go bridge.'
+                        : controller.connectionError,
+                    onRetry: controller.reconnect,
+                  ),
+                  BridgeConnection.ready when authBlocked => AuthView(
+                    auth: controller.auth,
+                    onRetry: controller.requestDeviceLogin,
+                  ),
+                  BridgeConnection.ready =>
+                    controller.sessions.isEmpty
+                        ? ConnectionStateView(
+                            title: 'No conversations yet',
+                            message: 'Start a conversation in any workspace.',
+                            onRetry: _newConversation,
+                            retryLabel: 'New conversation',
+                          )
+                        : PageView.builder(
+                            controller: _pages,
+                            physics: const PageScrollPhysics(),
+                            onPageChanged: _selectPage,
+                            itemCount: controller.sessions.length,
+                            itemBuilder: (context, index) => SessionPage(
+                              key: ValueKey(controller.sessions[index].localId),
+                              session: controller.sessions[index],
+                              onPrompt: (prompt) {
+                                _composer.text = prompt;
+                                _send();
+                              },
+                              onApproval: controller.decideApproval,
+                            ),
+                          ),
+                },
+              ),
+            ],
+          ),
         ),
         bottomNavigationBar: ComposerBar(
           controller: _composer,

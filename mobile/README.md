@@ -12,6 +12,9 @@ UI, so browser, terminal, and mobile clients share live Codex sessions.
 - The message composer is a fixed Android safe-area surface. It stays in place
   while session pages move behind it and changes to an interrupt button while
   the selected session is working.
+- The top action bar is outside the pageable session content and remains visible
+  during connection, authentication, empty, offline, and active-session states,
+  so the server Settings action is always reachable.
 - The session button in the upper-left opens a conventional session picker for
   direct navigation. Active sessions are marked with a bolt.
 - New conversations support server-backed workspace path completion.

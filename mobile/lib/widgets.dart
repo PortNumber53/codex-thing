@@ -19,23 +19,11 @@ class SessionPage extends StatefulWidget {
   const SessionPage({
     super.key,
     required this.session,
-    required this.index,
-    required this.count,
-    required this.socketConnected,
-    required this.onSessions,
-    required this.onSettings,
-    required this.onNew,
     required this.onPrompt,
     required this.onApproval,
   });
 
   final MobileSession session;
-  final int index;
-  final int count;
-  final bool socketConnected;
-  final VoidCallback onSessions;
-  final VoidCallback onSettings;
-  final VoidCallback onNew;
   final ValueChanged<String> onPrompt;
   final Future<void> Function(
     MobileSession,
@@ -88,188 +76,215 @@ class _SessionPageState extends State<SessionPage> {
   @override
   Widget build(BuildContext context) {
     final session = widget.session;
-    return Column(
-      children: [
-        _SessionHeader(
-          session: session,
-          socketConnected: widget.socketConnected,
-          onSessions: widget.onSessions,
-          onSettings: widget.onSettings,
-          onNew: widget.onNew,
-        ),
-        Expanded(
-          child: session.loading && !session.loaded
-              ? const Center(child: CircularProgressIndicator())
-              : CustomScrollView(
-                  controller: _scroll,
-                  keyboardDismissBehavior:
-                      ScrollViewKeyboardDismissBehavior.onDrag,
-                  slivers: [
-                    if (session.error.isNotEmpty)
-                      SliverToBoxAdapter(
-                        child: _ReadableWidth(
-                          child: _InlineError(message: session.error),
-                        ),
-                      ),
-                    if (session.messages.isEmpty)
-                      SliverFillRemaining(
-                        hasScrollBody: false,
-                        child: EmptyConversation(onPrompt: widget.onPrompt),
-                      )
-                    else
-                      SliverPadding(
-                        padding: const EdgeInsets.fromLTRB(16, 14, 16, 24),
-                        sliver: SliverList.builder(
-                          itemCount: session.messages.length,
-                          itemBuilder: (context, index) => _ReadableWidth(
-                            child: TranscriptItem(
-                              item: session.messages[index],
-                              isLast: index == session.messages.length - 1,
-                            ),
-                          ),
-                        ),
-                      ),
-                    if (session.activity.isNotEmpty)
-                      SliverToBoxAdapter(
-                        child: _ReadableWidth(
-                          child: Padding(
-                            padding: const EdgeInsets.fromLTRB(22, 0, 22, 12),
-                            child: Row(
-                              children: [
-                                const SizedBox.square(
-                                  dimension: 14,
-                                  child: CircularProgressIndicator(
-                                    strokeWidth: 1.8,
-                                  ),
-                                ),
-                                const SizedBox(width: 10),
-                                Text(
-                                  session.activity,
-                                  style: const TextStyle(color: _muted),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-                      ),
-                    if (session.approvals.isNotEmpty)
-                      SliverPadding(
-                        padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
-                        sliver: SliverList.builder(
-                          itemCount: session.approvals.length,
-                          itemBuilder: (context, index) {
-                            final approval = session.approvals[index];
-                            return _ReadableWidth(
-                              child: ApprovalCard(
-                                key: ValueKey(approval.id),
-                                approval: approval,
-                                deciding: session.decidingApprovals.contains(
-                                  approval.id,
-                                ),
-                                onDecision: (decision, {answers, content}) =>
-                                    widget.onApproval(
-                                      session,
-                                      approval,
-                                      decision,
-                                      answers: answers,
-                                      content: content,
-                                    ),
-                              ),
-                            );
-                          },
-                        ),
-                      ),
-                  ],
+    return session.loading && !session.loaded
+        ? const Center(child: CircularProgressIndicator())
+        : CustomScrollView(
+            controller: _scroll,
+            keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+            slivers: [
+              if (session.error.isNotEmpty)
+                SliverToBoxAdapter(
+                  child: _ReadableWidth(
+                    child: _InlineError(message: session.error),
+                  ),
                 ),
-        ),
-      ],
-    );
+              if (session.messages.isEmpty)
+                SliverFillRemaining(
+                  hasScrollBody: false,
+                  child: EmptyConversation(onPrompt: widget.onPrompt),
+                )
+              else
+                SliverPadding(
+                  padding: const EdgeInsets.fromLTRB(16, 14, 16, 24),
+                  sliver: SliverList.builder(
+                    itemCount: session.messages.length,
+                    itemBuilder: (context, index) => _ReadableWidth(
+                      child: TranscriptItem(
+                        item: session.messages[index],
+                        isLast: index == session.messages.length - 1,
+                      ),
+                    ),
+                  ),
+                ),
+              if (session.activity.isNotEmpty)
+                SliverToBoxAdapter(
+                  child: _ReadableWidth(
+                    child: Padding(
+                      padding: const EdgeInsets.fromLTRB(22, 0, 22, 12),
+                      child: Row(
+                        children: [
+                          const SizedBox.square(
+                            dimension: 14,
+                            child: CircularProgressIndicator(strokeWidth: 1.8),
+                          ),
+                          const SizedBox(width: 10),
+                          Text(
+                            session.activity,
+                            style: const TextStyle(color: _muted),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              if (session.approvals.isNotEmpty)
+                SliverPadding(
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
+                  sliver: SliverList.builder(
+                    itemCount: session.approvals.length,
+                    itemBuilder: (context, index) {
+                      final approval = session.approvals[index];
+                      return _ReadableWidth(
+                        child: ApprovalCard(
+                          key: ValueKey(approval.id),
+                          approval: approval,
+                          deciding: session.decidingApprovals.contains(
+                            approval.id,
+                          ),
+                          onDecision: (decision, {answers, content}) =>
+                              widget.onApproval(
+                                session,
+                                approval,
+                                decision,
+                                answers: answers,
+                                content: content,
+                              ),
+                        ),
+                      );
+                    },
+                  ),
+                ),
+            ],
+          );
   }
 }
 
-class _SessionHeader extends StatelessWidget {
-  const _SessionHeader({
+class PersistentActionBar extends StatelessWidget {
+  const PersistentActionBar({
+    super.key,
+    required this.connection,
     required this.session,
     required this.socketConnected,
+    required this.authBlocked,
+    required this.hasSessions,
     required this.onSessions,
-    required this.onSettings,
     required this.onNew,
+    required this.onSettings,
   });
 
-  final MobileSession session;
+  final BridgeConnection connection;
+  final MobileSession? session;
   final bool socketConnected;
+  final bool authBlocked;
+  final bool hasSessions;
   final VoidCallback onSessions;
-  final VoidCallback onSettings;
   final VoidCallback onNew;
+  final VoidCallback onSettings;
 
   @override
   Widget build(BuildContext context) => Container(
     padding: const EdgeInsets.fromLTRB(8, 6, 8, 10),
     decoration: const BoxDecoration(
+      color: Color(0xFF0E1014),
       border: Border(bottom: BorderSide(color: _border)),
     ),
-    child: Row(
-      children: [
-        IconButton(
-          onPressed: onSessions,
-          tooltip: 'Sessions',
-          icon: const Icon(Icons.view_carousel_outlined),
-        ),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                session.title,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
-                  fontWeight: FontWeight.w700,
-                  fontSize: 15,
-                ),
-              ),
-              const SizedBox(height: 3),
-              Row(
+    child: LayoutBuilder(
+      builder: (context, constraints) {
+        final showLabels = constraints.maxWidth >= 600;
+        final ready = connection == BridgeConnection.ready && !authBlocked;
+        final title = ready && session != null ? session!.title : 'Codex Local';
+        final subtitle = switch (connection) {
+          BridgeConnection.connecting => 'Connecting to app-server',
+          BridgeConnection.offline => 'App-server offline',
+          BridgeConnection.ready when authBlocked => 'Sign in required',
+          BridgeConnection.ready when session?.working == true =>
+            'Codex is working',
+          BridgeConnection.ready =>
+            session == null
+                ? 'Ready for a new conversation'
+                : _workspaceName(session!.workspace),
+        };
+        final statusColor = switch (connection) {
+          BridgeConnection.connecting => const Color(0xFFFFC46B),
+          BridgeConnection.offline => _danger,
+          BridgeConnection.ready when authBlocked => const Color(0xFFFFC46B),
+          BridgeConnection.ready when session?.working == true => _accent,
+          BridgeConnection.ready when socketConnected => const Color(
+            0xFF74D7A0,
+          ),
+          BridgeConnection.ready => const Color(0xFFFFC46B),
+        };
+        Widget action({
+          required IconData icon,
+          required String label,
+          required VoidCallback? onPressed,
+        }) => showLabels
+            ? TextButton.icon(
+                onPressed: onPressed,
+                icon: Icon(icon, size: 18),
+                label: Text(label),
+              )
+            : IconButton(
+                onPressed: onPressed,
+                tooltip: label,
+                icon: Icon(icon),
+              );
+
+        return Row(
+          children: [
+            action(
+              icon: Icons.view_carousel_outlined,
+              label: 'Sessions',
+              onPressed: ready && hasSessions ? onSessions : null,
+            ),
+            const SizedBox(width: 4),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Container(
-                    width: 7,
-                    height: 7,
-                    decoration: BoxDecoration(
-                      color: session.working
-                          ? _accent
-                          : socketConnected
-                          ? const Color(0xFF74D7A0)
-                          : const Color(0xFFFFC46B),
-                      shape: BoxShape.circle,
+                  Text(
+                    title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontWeight: FontWeight.w700,
+                      fontSize: 15,
                     ),
                   ),
-                  const SizedBox(width: 6),
-                  Expanded(
-                    child: Text(
-                      session.working
-                          ? 'Codex is working'
-                          : _workspaceName(session.workspace),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(color: _muted, fontSize: 12),
-                    ),
+                  const SizedBox(height: 3),
+                  Row(
+                    children: [
+                      Container(
+                        width: 7,
+                        height: 7,
+                        decoration: BoxDecoration(
+                          color: statusColor,
+                          shape: BoxShape.circle,
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      Expanded(
+                        child: Text(
+                          subtitle,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(color: _muted, fontSize: 12),
+                        ),
+                      ),
+                    ],
                   ),
                 ],
               ),
-            ],
-          ),
-        ),
-        IconButton(
-          onPressed: session.working ? null : onNew,
-          tooltip: 'New conversation',
-          icon: const Icon(Icons.add_comment_outlined),
-        ),
-        IconButton(
-          onPressed: onSettings,
-          tooltip: 'Server settings',
-          icon: const Icon(Icons.tune),
-        ),
-      ],
+            ),
+            action(
+              icon: Icons.add_comment_outlined,
+              label: 'New',
+              onPressed: ready && session?.working != true ? onNew : null,
+            ),
+            action(icon: Icons.tune, label: 'Settings', onPressed: onSettings),
+          ],
+        );
+      },
     ),
   );
 }
@@ -970,136 +985,105 @@ class _ApprovalShell extends StatelessWidget {
 }
 
 class AuthView extends StatelessWidget {
-  const AuthView({
-    super.key,
-    required this.auth,
-    required this.onRetry,
-    required this.onSettings,
-  });
+  const AuthView({super.key, required this.auth, required this.onRetry});
 
   final AuthSnapshot auth;
   final VoidCallback onRetry;
-  final VoidCallback onSettings;
 
   @override
-  Widget build(BuildContext context) => Column(
-    children: [
-      Align(
-        alignment: Alignment.centerRight,
-        child: Padding(
-          padding: const EdgeInsets.all(8),
-          child: IconButton(
-            onPressed: onSettings,
-            icon: const Icon(Icons.tune),
-            tooltip: 'Server settings',
-          ),
+  Widget build(BuildContext context) => SingleChildScrollView(
+    padding: const EdgeInsets.fromLTRB(24, 20, 24, 32),
+    child: Column(
+      children: [
+        const Icon(Icons.lock_open_rounded, size: 54, color: _accent),
+        const SizedBox(height: 22),
+        Text(
+          auth.pending
+              ? 'Sign in to continue'
+              : auth.busy
+              ? 'Checking your Codex login…'
+              : 'Codex needs you to sign in',
+          textAlign: TextAlign.center,
+          style: const TextStyle(fontSize: 26, fontWeight: FontWeight.w800),
         ),
-      ),
-      Expanded(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.fromLTRB(24, 20, 24, 32),
-          child: Column(
-            children: [
-              const Icon(Icons.lock_open_rounded, size: 54, color: _accent),
-              const SizedBox(height: 22),
-              Text(
-                auth.pending
-                    ? 'Sign in to continue'
-                    : auth.busy
-                    ? 'Checking your Codex login…'
-                    : 'Codex needs you to sign in',
-                textAlign: TextAlign.center,
-                style: const TextStyle(
-                  fontSize: 26,
-                  fontWeight: FontWeight.w800,
+        const SizedBox(height: 12),
+        Text(
+          auth.message.isEmpty
+              ? 'Authenticate the shared Codex app-server to use every connected client.'
+              : auth.message,
+          textAlign: TextAlign.center,
+          style: const TextStyle(color: _muted, height: 1.5),
+        ),
+        const SizedBox(height: 26),
+        if (auth.pending) ...[
+          FilledButton.icon(
+            onPressed: () async {
+              final uri = Uri.tryParse(auth.verificationUrl);
+              if (uri != null) {
+                await launchUrl(uri, mode: LaunchMode.externalApplication);
+              }
+            },
+            icon: const Icon(Icons.open_in_browser),
+            label: const Text('Open OpenAI sign-in page'),
+          ),
+          const SizedBox(height: 18),
+          Container(
+            padding: const EdgeInsets.fromLTRB(20, 15, 10, 15),
+            decoration: BoxDecoration(
+              color: _raised,
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: _border),
+            ),
+            child: Row(
+              children: [
+                Expanded(
+                  child: SelectableText(
+                    auth.userCode,
+                    style: const TextStyle(
+                      fontFamily: 'monospace',
+                      fontSize: 23,
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: 2,
+                    ),
+                  ),
                 ),
-              ),
-              const SizedBox(height: 12),
-              Text(
-                auth.message.isEmpty
-                    ? 'Authenticate the shared Codex app-server to use every connected client.'
-                    : auth.message,
-                textAlign: TextAlign.center,
-                style: const TextStyle(color: _muted, height: 1.5),
-              ),
-              const SizedBox(height: 26),
-              if (auth.pending) ...[
-                FilledButton.icon(
+                IconButton(
                   onPressed: () async {
-                    final uri = Uri.tryParse(auth.verificationUrl);
-                    if (uri != null) {
-                      await launchUrl(
-                        uri,
-                        mode: LaunchMode.externalApplication,
+                    await Clipboard.setData(ClipboardData(text: auth.userCode));
+                    if (context.mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text('Code copied')),
                       );
                     }
                   },
-                  icon: const Icon(Icons.open_in_browser),
-                  label: const Text('Open OpenAI sign-in page'),
+                  icon: const Icon(Icons.copy),
+                  tooltip: 'Copy code',
                 ),
-                const SizedBox(height: 18),
-                Container(
-                  padding: const EdgeInsets.fromLTRB(20, 15, 10, 15),
-                  decoration: BoxDecoration(
-                    color: _raised,
-                    borderRadius: BorderRadius.circular(16),
-                    border: Border.all(color: _border),
-                  ),
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: SelectableText(
-                          auth.userCode,
-                          style: const TextStyle(
-                            fontFamily: 'monospace',
-                            fontSize: 23,
-                            fontWeight: FontWeight.w800,
-                            letterSpacing: 2,
-                          ),
-                        ),
-                      ),
-                      IconButton(
-                        onPressed: () async {
-                          await Clipboard.setData(
-                            ClipboardData(text: auth.userCode),
-                          );
-                          if (context.mounted) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(content: Text('Code copied')),
-                            );
-                          }
-                        },
-                        icon: const Icon(Icons.copy),
-                        tooltip: 'Copy code',
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: 18),
-                const Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    SizedBox.square(
-                      dimension: 16,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    ),
-                    SizedBox(width: 10),
-                    Text('Waiting for sign-in to complete…'),
-                  ],
-                ),
-              ] else if (auth.busy)
-                const CircularProgressIndicator()
-              else
-                FilledButton.icon(
-                  onPressed: onRetry,
-                  icon: const Icon(Icons.key),
-                  label: const Text('Get a sign-in code'),
-                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 18),
+          const Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              SizedBox.square(
+                dimension: 16,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+              SizedBox(width: 10),
+              Text('Waiting for sign-in to complete…'),
             ],
           ),
-        ),
-      ),
-    ],
+        ] else if (auth.busy)
+          const CircularProgressIndicator()
+        else
+          FilledButton.icon(
+            onPressed: onRetry,
+            icon: const Icon(Icons.key),
+            label: const Text('Get a sign-in code'),
+          ),
+      ],
+    ),
   );
 }
 
