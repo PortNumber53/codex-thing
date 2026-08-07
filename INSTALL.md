@@ -53,7 +53,7 @@ Install these commands before continuing:
 Example prerequisite installation commands follow. Use the platform's supported
 package source if these commands are not appropriate for that host.
 
-Arch Linux, including `SERVER`:
+Arch Linux:
 
 ```bash
 sudo pacman -S --needed nodejs npm go git rsync
@@ -192,77 +192,6 @@ tail -n 100 "$CODEX_THING_DIR/codex-thing.error.log"
 A LaunchAgent is a user-login service, which is the macOS equivalent appropriate
 for a process that uses that user's Codex authentication.
 
-## Environment-specific deployment: `WORKSTATION` to `SERVER`
-
-The repository includes a deliberately isolated `SERVER` deployment wrapper. It
-does not place the hostname in generic service code.
-
-The validated `SERVER` environment is Arch Linux x86-64 with user `codex-user`,
-passwordless sudo, a running systemd user manager with lingering enabled, Node,
-npm, Go, and Codex on `PATH`. Its Codex CLI was older than the required version at
-the time this runbook was written, so the first deployment must include the
-explicit upgrade flag.
-
-From the repository checkout on `WORKSTATION`, run:
-
-```bash
-cd /path/to/codex-thing
-./scripts/deploy-SERVER.sh --upgrade-codex
-```
-
-That command performs the following bounded operations:
-
-1. Connects to the SSH alias `SERVER` with batch authentication.
-2. Creates `/opt/codex-thing` with sudo and gives it to the SSH user.
-3. Uses `rsync` to make the release files match the checkout, excluding `.git`,
-   local dependencies, builds, logs, and the remote `config.env`.
-4. Upgrades the remote Codex CLI with
-   `sudo npm install -g @openai/codex@latest` because the flag was supplied.
-5. Builds the application remotely.
-6. Installs and starts `~/.config/systemd/user/codex-thing.service`.
-7. Installs managed wrapper blocks in `~/.zshrc` and `~/.bashrc`.
-
-Subsequent deployments normally omit the upgrade flag:
-
-```bash
-./scripts/deploy-SERVER.sh
-```
-
-Verify from `WORKSTATION`:
-
-```bash
-ssh SERVER 'codex login status'
-ssh SERVER 'systemctl --user status codex-thing.service --no-pager'
-ssh SERVER 'curl --fail http://127.0.0.1:40001/api/health'
-curl --fail http://SERVER:40001/api/health
-```
-
-If authentication is missing, authenticate as `codex-user` on `SERVER` and run the
-deployment again. If the service logs report an expired refresh token even though
-`codex login status` succeeds, reauthenticate or securely copy the active
-`WORKSTATION` `auth.json` as described under Requirements, then run:
-
-```bash
-ssh SERVER 'systemctl --user restart codex-thing.service'
-```
-
-Do not use `--skip-auth-check` for a normal deployment.
-
-The `SERVER` defaults are:
-
-| Setting | Value |
-| --- | --- |
-| SSH host | `SERVER` |
-| Install directory | `/opt/codex-thing` |
-| Initial workspace | `/home/codex` |
-| Web UI | `http://SERVER:40001` |
-| Private app-server | `ws://127.0.0.1:40002` on `SERVER` |
-| Shell wrappers | zsh and bash |
-
-Override those values with `deploy-SERVER.sh --help`; for example,
-`--workspace /home/codex/projects` narrows filesystem suggestions and the
-initial workspace.
-
 ## Connecting terminal UIs
 
 After restarting a shell on the server, plain `codex` uses the shared local
@@ -270,7 +199,8 @@ app-server because of the installed wrapper. `codex resume SESSION_ID` and the
 interactive session picker do as well.
 
 To connect a terminal UI from a different computer, tunnel the app-server rather
-than exposing it. This example maps local port `41002` to `SERVER` port `40002`:
+than exposing it. This example maps client port `41002` to port `40002` on the
+installation host:
 
 ```bash
 ssh -N -L 41002:127.0.0.1:40002 SERVER
@@ -334,9 +264,6 @@ git pull --ff-only
   --shells auto
 exec "$SHELL" -l
 ```
-
-For `SERVER`, run `./scripts/deploy-SERVER.sh` from `WORKSTATION`. The service is
-restarted by the remote installer after the new build succeeds.
 
 ## Stopping or uninstalling
 

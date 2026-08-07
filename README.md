@@ -6,10 +6,9 @@ A Vite + React chat interface backed by a small Go service and one shared Codex 
 
 Requirements: Node 20+, Go 1.23+, and an authenticated `codex` CLI on `PATH`.
 
-For a persistent Linux or macOS installation, including the `SERVER` deployment
-from `WORKSTATION`, follow [INSTALL.md](INSTALL.md). The production installer builds
-the Vite UI and runs one managed Go service; Vite's port `40000` is development
-only.
+For a persistent Linux or macOS installation, follow [INSTALL.md](INSTALL.md).
+The production installer builds the Vite UI and runs one managed Go service;
+Vite's port `40000` is development only.
 
 ```bash
 npm install
@@ -23,6 +22,18 @@ npm run dev
 ```
 
 Open `http://<machine-ip>:40000`. The development UI listens on all interfaces and proxies API calls to the Go service on port `40001`.
+
+When accessing Vite through a custom hostname, create an ignored local config
+file without committing that hostname:
+
+```bash
+cp .env.example .env.local
+# Edit .env.local and set:
+VITE_ALLOWED_HOSTS=dev-host.example.com
+npm run dev
+```
+
+Multiple hostnames can be supplied as a comma-separated list.
 
 The Go service starts Codex app-server on loopback port `40002`. Join that same live runtime from a terminal with:
 

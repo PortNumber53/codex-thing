@@ -2,5 +2,7 @@ node_modules/
 dist/
 bin/
 config.env
+.env.local
+.local/
 .DS_Store
 *.log
