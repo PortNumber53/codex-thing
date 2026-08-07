@@ -240,8 +240,9 @@ class _CodexHomeState extends State<CodexHome> {
       final authBlocked =
           controller.connection == BridgeConnection.ready &&
           !controller.auth.authenticated;
+      final keyboardInset = MediaQuery.viewInsetsOf(context).bottom;
       return Scaffold(
-        resizeToAvoidBottomInset: true,
+        resizeToAvoidBottomInset: false,
         body: SafeArea(
           bottom: false,
           child: Column(
@@ -302,21 +303,28 @@ class _CodexHomeState extends State<CodexHome> {
             ],
           ),
         ),
-        bottomNavigationBar: ComposerBar(
-          controller: _composer,
-          focusNode: _composerFocus,
-          session: session,
-          sessionIndex: controller.selectedIndex,
-          sessionCount: controller.sessions.length,
-          enabled:
-              controller.connection == BridgeConnection.ready &&
-              controller.auth.authenticated,
-          onChanged: (value) {
-            final current = controller.selectedSession;
-            if (current != null) current.composerText = value;
-          },
-          onSend: _send,
-          onStop: session == null ? null : () => controller.interrupt(session),
+        bottomNavigationBar: AnimatedPadding(
+          duration: const Duration(milliseconds: 180),
+          curve: Curves.easeOutCubic,
+          padding: EdgeInsets.only(bottom: keyboardInset),
+          child: ComposerBar(
+            controller: _composer,
+            focusNode: _composerFocus,
+            session: session,
+            sessionIndex: controller.selectedIndex,
+            sessionCount: controller.sessions.length,
+            enabled:
+                controller.connection == BridgeConnection.ready &&
+                controller.auth.authenticated,
+            onChanged: (value) {
+              final current = controller.selectedSession;
+              if (current != null) current.composerText = value;
+            },
+            onSend: _send,
+            onStop: session == null
+                ? null
+                : () => controller.interrupt(session),
+          ),
         ),
       );
     },

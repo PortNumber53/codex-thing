@@ -112,4 +112,24 @@ void main() {
     expect(find.text('Codex server'), findsOneWidget);
     expect(find.text('Server URL'), findsOneWidget);
   });
+
+  testWidgets('composer stays above the software keyboard', (tester) async {
+    final controller = CodexController(preview: true);
+    addTearDown(controller.dispose);
+    addTearDown(() => tester.view.resetViewInsets());
+
+    await tester.pumpWidget(CodexMobileApp(controller: controller));
+    await tester.pumpAndSettle();
+
+    tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+    await tester.pumpAndSettle();
+
+    final composer = find.byType(ComposerBar);
+    expect(composer, findsOneWidget);
+    final composerContext = tester.element(composer);
+    final keyboardTop =
+        MediaQuery.sizeOf(composerContext).height -
+        MediaQuery.viewInsetsOf(composerContext).bottom;
+    expect(tester.getBottomRight(composer).dy, lessThanOrEqualTo(keyboardTop));
+  });
 }
