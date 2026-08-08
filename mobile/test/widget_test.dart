@@ -230,6 +230,36 @@ void main() {
     );
   });
 
+  testWidgets('session search results stay above the software keyboard', (
+    tester,
+  ) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(800, 800);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetViewInsets);
+    final controller = CodexController(preview: true);
+    addTearDown(controller.dispose);
+
+    await tester.pumpWidget(CodexMobileApp(controller: controller));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Sessions'));
+    await tester.pumpAndSettle();
+
+    final search = find.byKey(const ValueKey('session-search-field'));
+    await tester.tap(search);
+    tester.view.viewInsets = const FakeViewPadding(bottom: 320);
+    await tester.pumpAndSettle();
+
+    final list = find.descendant(
+      of: find.byType(SessionPickerSheet),
+      matching: find.byType(ReorderableListView),
+    );
+    expect(list, findsOneWidget);
+    expect(tester.getBottomRight(list).dy, lessThanOrEqualTo(480));
+    expect(tester.testTextInput.isVisible, isTrue);
+  });
+
   testWidgets('composer stays above the software keyboard', (tester) async {
     final controller = CodexController(preview: true);
     addTearDown(controller.dispose);

@@ -188,6 +188,7 @@ class _CodexHomeState extends State<CodexHome> {
   Future<void> _showSessions() async {
     final selected = await showModalBottomSheet<int>(
       context: context,
+      isScrollControlled: true,
       useSafeArea: true,
       showDragHandle: true,
       backgroundColor: const Color(0xFF171A20),
@@ -557,6 +558,7 @@ class _LandscapeConversationPaneState
   Future<void> _showSessions() async {
     final selected = await showModalBottomSheet<int>(
       context: context,
+      isScrollControlled: true,
       useSafeArea: true,
       showDragHandle: true,
       backgroundColor: const Color(0xFF171A20),

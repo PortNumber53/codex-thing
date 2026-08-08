@@ -1349,187 +1349,200 @@ class _SessionPickerSheetState extends State<SessionPickerSheet> {
       }
     }
     final filtering = query.isNotEmpty;
+    final media = MediaQuery.of(context);
+    final keyboardInset = media.viewInsets.bottom;
+    final preferredHeight = media.size.height * .68;
+    final availableHeight = media.size.height - keyboardInset - 24;
+    final sheetHeight = availableHeight.clamp(0.0, preferredHeight);
 
-    return SafeArea(
-      top: false,
-      minimum: const EdgeInsets.only(bottom: 8),
-      child: SizedBox(
-        height: MediaQuery.sizeOf(context).height * .68,
-        child: Column(
-          children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(20, 2, 12, 12),
-              child: Row(
-                children: [
-                  const Expanded(
-                    child: Text(
-                      'Sessions',
-                      style: TextStyle(
-                        fontSize: 22,
-                        fontWeight: FontWeight.w800,
-                      ),
-                    ),
-                  ),
-                  IconButton.filledTonal(
-                    onPressed: widget.onNew,
-                    icon: const Icon(Icons.add),
-                    tooltip: 'New conversation',
-                  ),
-                ],
-              ),
-            ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
-              child: TextField(
-                key: const ValueKey('session-search-field'),
-                controller: _search,
-                onChanged: (value) => setState(() => _query = value),
-                autocorrect: false,
-                textInputAction: TextInputAction.search,
-                decoration: InputDecoration(
-                  hintText: 'Search sessions',
-                  prefixIcon: const Icon(Icons.search),
-                  suffixIcon: filtering
-                      ? IconButton(
-                          onPressed: () {
-                            _search.clear();
-                            setState(() => _query = '');
-                          },
-                          icon: const Icon(Icons.close),
-                          tooltip: 'Clear session search',
-                        )
-                      : null,
-                ),
-              ),
-            ),
-            const Divider(height: 1),
-            Expanded(
-              child: visibleSessions.isEmpty
-                  ? const Center(
-                      child: Padding(
-                        padding: EdgeInsets.all(24),
-                        child: Text(
-                          'No sessions match your search.',
-                          textAlign: TextAlign.center,
-                          style: TextStyle(color: _muted),
+    return AnimatedPadding(
+      duration: const Duration(milliseconds: 220),
+      curve: Curves.easeOutCubic,
+      padding: EdgeInsets.only(bottom: keyboardInset),
+      child: SafeArea(
+        top: false,
+        minimum: const EdgeInsets.only(bottom: 8),
+        child: SizedBox(
+          height: sheetHeight,
+          child: Column(
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 2, 12, 12),
+                child: Row(
+                  children: [
+                    const Expanded(
+                      child: Text(
+                        'Sessions',
+                        style: TextStyle(
+                          fontSize: 22,
+                          fontWeight: FontWeight.w800,
                         ),
                       ),
-                    )
-                  : ReorderableListView.builder(
-                      itemCount: visibleSessions.length,
-                      buildDefaultDragHandles: false,
-                      onReorderItem: (oldIndex, newIndex) {
-                        if (filtering) return;
-                        widget.onReorder(oldIndex, newIndex);
-                        setState(() {});
-                      },
-                      itemBuilder: (context, index) {
-                        final entry = visibleSessions[index];
-                        final originalIndex = entry.key;
-                        final session = entry.value;
-                        final workspace = session.workspace.trim();
-                        final detail = session.working
-                            ? 'Codex is working'
-                            : session.preview.trim();
-                        final selected = session.localId == _selectedSessionId;
-                        return Column(
-                          key: ValueKey(session.localId),
-                          children: [
-                            ListTile(
-                              selected: selected,
-                              isThreeLine: detail.isNotEmpty,
-                              leading: CircleAvatar(
-                                backgroundColor: session.working
-                                    ? const Color(0xFF294A38)
-                                    : _raised,
-                                child: Icon(
-                                  session.working
-                                      ? Icons.bolt
-                                      : Icons.chat_bubble_outline,
-                                  color: session.working ? _accent : _muted,
-                                  size: 19,
-                                ),
-                              ),
-                              title: Text(
-                                session.title,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                              subtitle: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(
-                                    workspace.isEmpty
-                                        ? 'Workspace not reported'
-                                        : workspace,
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: const TextStyle(
-                                      color: _accent,
-                                      fontSize: 12,
-                                    ),
+                    ),
+                    IconButton.filledTonal(
+                      onPressed: widget.onNew,
+                      icon: const Icon(Icons.add),
+                      tooltip: 'New conversation',
+                    ),
+                  ],
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+                child: TextField(
+                  key: const ValueKey('session-search-field'),
+                  controller: _search,
+                  onChanged: (value) => setState(() => _query = value),
+                  autocorrect: false,
+                  textInputAction: TextInputAction.search,
+                  decoration: InputDecoration(
+                    hintText: 'Search sessions',
+                    prefixIcon: const Icon(Icons.search),
+                    suffixIcon: filtering
+                        ? IconButton(
+                            onPressed: () {
+                              _search.clear();
+                              setState(() => _query = '');
+                            },
+                            icon: const Icon(Icons.close),
+                            tooltip: 'Clear session search',
+                          )
+                        : null,
+                  ),
+                ),
+              ),
+              const Divider(height: 1),
+              Expanded(
+                child: visibleSessions.isEmpty
+                    ? const Center(
+                        child: Padding(
+                          padding: EdgeInsets.all(24),
+                          child: Text(
+                            'No sessions match your search.',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(color: _muted),
+                          ),
+                        ),
+                      )
+                    : ReorderableListView.builder(
+                        itemCount: visibleSessions.length,
+                        buildDefaultDragHandles: false,
+                        onReorderItem: (oldIndex, newIndex) {
+                          if (filtering) return;
+                          widget.onReorder(oldIndex, newIndex);
+                          setState(() {});
+                        },
+                        itemBuilder: (context, index) {
+                          final entry = visibleSessions[index];
+                          final originalIndex = entry.key;
+                          final session = entry.value;
+                          final workspace = session.workspace.trim();
+                          final detail = session.working
+                              ? 'Codex is working'
+                              : session.preview.trim();
+                          final selected =
+                              session.localId == _selectedSessionId;
+                          return Column(
+                            key: ValueKey(session.localId),
+                            children: [
+                              ListTile(
+                                selected: selected,
+                                isThreeLine: detail.isNotEmpty,
+                                leading: CircleAvatar(
+                                  backgroundColor: session.working
+                                      ? const Color(0xFF294A38)
+                                      : _raised,
+                                  child: Icon(
+                                    session.working
+                                        ? Icons.bolt
+                                        : Icons.chat_bubble_outline,
+                                    color: session.working ? _accent : _muted,
+                                    size: 19,
                                   ),
-                                  if (detail.isNotEmpty)
+                                ),
+                                title: Text(
+                                  session.title,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                                subtitle: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
                                     Text(
-                                      detail,
+                                      workspace.isEmpty
+                                          ? 'Workspace not reported'
+                                          : workspace,
                                       maxLines: 1,
                                       overflow: TextOverflow.ellipsis,
-                                    ),
-                                ],
-                              ),
-                              trailing: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  if (selected)
-                                    const Icon(Icons.check, color: _accent),
-                                  PopupMenuButton<String>(
-                                    enabled:
-                                        session.threadId.isNotEmpty &&
-                                        !session.draft,
-                                    tooltip: 'Session actions',
-                                    onSelected: (action) {
-                                      if (action == 'rename') _rename(session);
-                                    },
-                                    itemBuilder: (context) => const [
-                                      PopupMenuItem(
-                                        value: 'rename',
-                                        child: ListTile(
-                                          contentPadding: EdgeInsets.zero,
-                                          leading: Icon(Icons.edit_outlined),
-                                          title: Text('Rename session'),
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                  if (!filtering)
-                                    ReorderableDragStartListener(
-                                      index: index,
-                                      child: const Tooltip(
-                                        message: 'Reorder session',
-                                        child: Padding(
-                                          padding: EdgeInsets.symmetric(
-                                            horizontal: 8,
-                                            vertical: 12,
-                                          ),
-                                          child: Icon(
-                                            Icons.drag_handle,
-                                            color: _muted,
-                                          ),
-                                        ),
+                                      style: const TextStyle(
+                                        color: _accent,
+                                        fontSize: 12,
                                       ),
                                     ),
-                                ],
+                                    if (detail.isNotEmpty)
+                                      Text(
+                                        detail,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                  ],
+                                ),
+                                trailing: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    if (selected)
+                                      const Icon(Icons.check, color: _accent),
+                                    PopupMenuButton<String>(
+                                      enabled:
+                                          session.threadId.isNotEmpty &&
+                                          !session.draft,
+                                      tooltip: 'Session actions',
+                                      onSelected: (action) {
+                                        if (action == 'rename') {
+                                          _rename(session);
+                                        }
+                                      },
+                                      itemBuilder: (context) => const [
+                                        PopupMenuItem(
+                                          value: 'rename',
+                                          child: ListTile(
+                                            contentPadding: EdgeInsets.zero,
+                                            leading: Icon(Icons.edit_outlined),
+                                            title: Text('Rename session'),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                    if (!filtering)
+                                      ReorderableDragStartListener(
+                                        index: index,
+                                        child: const Tooltip(
+                                          message: 'Reorder session',
+                                          child: Padding(
+                                            padding: EdgeInsets.symmetric(
+                                              horizontal: 8,
+                                              vertical: 12,
+                                            ),
+                                            child: Icon(
+                                              Icons.drag_handle,
+                                              color: _muted,
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                  ],
+                                ),
+                                onTap: () =>
+                                    Navigator.pop(context, originalIndex),
                               ),
-                              onTap: () =>
-                                  Navigator.pop(context, originalIndex),
-                            ),
-                            const Divider(height: 1, indent: 72),
-                          ],
-                        );
-                      },
-                    ),
-            ),
-          ],
+                              const Divider(height: 1, indent: 72),
+                            ],
+                          );
+                        },
+                      ),
+              ),
+            ],
+          ),
         ),
       ),
     );
