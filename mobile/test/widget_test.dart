@@ -160,6 +160,76 @@ void main() {
     expect(pages.page, closeTo(1, .01));
   });
 
+  testWidgets('session picker searches and selects original session indices', (
+    tester,
+  ) async {
+    final controller = CodexController(preview: true);
+    addTearDown(controller.dispose);
+
+    await tester.pumpWidget(CodexMobileApp(controller: controller));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Sessions'));
+    await tester.pumpAndSettle();
+
+    final picker = find.byType(SessionPickerSheet);
+    final search = find.byKey(const ValueKey('session-search-field'));
+    expect(search, findsOneWidget);
+
+    await tester.enterText(search, 'review backend');
+    await tester.pumpAndSettle();
+
+    expect(
+      find.descendant(
+        of: picker,
+        matching: find.text('Review backend changes'),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: picker,
+        matching: find.text('Build the mobile client'),
+      ),
+      findsNothing,
+    );
+    expect(find.byTooltip('Reorder session'), findsNothing);
+
+    await tester.tap(
+      find.descendant(
+        of: picker,
+        matching: find.text('Review backend changes'),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(controller.selectedIndex, 1);
+    expect(find.text('Swipe sessions  ·  2 of 2'), findsOneWidget);
+  });
+
+  testWidgets('session list stays above the system navigation inset', (
+    tester,
+  ) async {
+    tester.view.padding = const FakeViewPadding(bottom: 80);
+    addTearDown(tester.view.resetPadding);
+    final controller = CodexController(preview: true);
+    addTearDown(controller.dispose);
+
+    await tester.pumpWidget(CodexMobileApp(controller: controller));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Sessions'));
+    await tester.pumpAndSettle();
+
+    final list = find.descendant(
+      of: find.byType(SessionPickerSheet),
+      matching: find.byType(ReorderableListView),
+    );
+    expect(list, findsOneWidget);
+    expect(
+      tester.getBottomRight(list).dy,
+      lessThanOrEqualTo(tester.view.physicalSize.height - 80),
+    );
+  });
+
   testWidgets('composer stays above the software keyboard', (tester) async {
     final controller = CodexController(preview: true);
     addTearDown(controller.dispose);
